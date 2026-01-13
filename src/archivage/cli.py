@@ -144,6 +144,27 @@ def twitter_sync(accounts):
             click.echo(f"Error archiving @{account}: {e}")
 
 
+@twitter.command("digest")
+@click.argument("accounts", nargs=-1)
+def twitter_digest(accounts):
+    """Generate digest files. No args = all archives."""
+    from .digest import generateDigest, listArchives
+
+    if not accounts:
+        accounts = listArchives()
+        if not accounts:
+            click.echo("No archives found")
+            sys.exit(1)
+        click.echo(f"Generating digests for {len(accounts)} accounts")
+
+    for account in accounts:
+        path = generateDigest(account)
+        if path:
+            click.echo(f"  {account} → {path}")
+        else:
+            click.echo(f"  {account}: no archive or empty")
+
+
 @cli.command("sync")
 @click.pass_context
 def sync(ctx):
