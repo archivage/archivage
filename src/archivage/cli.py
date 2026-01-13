@@ -10,18 +10,21 @@ from .twitter import TwitterClient
 from .storage import appendTweets, loadExistingIds, countTweets, getTweetId
 from .state import getAccountState, setAccountState, parseTweetDate
 from .config import getArchiveDir, getTwitterCookies, getTwitterAccounts
+from .log import setupLogging, logger
 
 
 def archiveAccount(account: str, cookies_path: Path, archive_dir: Path):
     """Archive a single Twitter account."""
     output_path = archive_dir / f"{account}.jsonl.gz"
 
+    logger.info(f"Sync start: @{account}")
     client = TwitterClient(cookies_path)
 
     try:
         # Get user ID
         user_id = client.getUserId(account)
         print(f"@{account} (ID: {user_id})")
+        logger.info(f"@{account} user_id={user_id}")
 
         # Check state
         state = getAccountState(account)
@@ -31,10 +34,12 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path):
 
         # Load existing IDs for dedup
         existing_ids = loadExistingIds(output_path)
+        logger.debug(f"Loaded {len(existing_ids)} existing IDs")
 
         # Determine starting point
         if status == "in_progress" and resume_cursor:
             print(f"Resuming from saved cursor...")
+            logger.info(f"Resuming from cursor: {resume_cursor[:30]}...")
             cursor = resume_cursor
         else:
             cursor = None
@@ -60,16 +65,20 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path):
                             oldest_date = tweet_date
 
                 print(f"  Page {page}: {len(tweets)} tweets, {new_count} new")
+                logger.debug(f"Page {page}: {len(tweets)} tweets, {new_count} new")
 
                 # Save cursor after each page for resume
                 if next_cursor:
                     setAccountState(account, cursor=next_cursor)
             else:
                 print(f"  Page {page}: 0 tweets")
+                logger.debug(f"Page {page}: 0 tweets")
 
             # Stop conditions
             if not next_cursor or not tweets:
+                stop_reason = "no cursor" if not next_cursor else "no tweets"
                 print("  End of timeline.")
+                logger.info(f"Sync stop: {stop_reason}")
                 break
 
             cursor = next_cursor
@@ -82,7 +91,9 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path):
             status="complete"
         )
 
-        print(f"  New: {total_new}, Total: {countTweets(output_path)}")
+        total = countTweets(output_path)
+        print(f"  New: {total_new}, Total: {total}")
+        logger.info(f"Sync complete: @{account} new={total_new} total={total}")
 
     finally:
         client.close()
@@ -111,7 +122,7 @@ def loadAccountsList() -> list[str]:
 @click.group()
 def cli():
     """Archive social media to JSONL.gz."""
-    pass
+    setupLogging()
 
 
 @cli.group()
@@ -142,6 +153,7 @@ def twitter_sync(accounts):
         try:
             archiveAccount(account, cookies, archive_dir)
         except Exception as e:
+            logger.error(f"Error archiving @{account}: {e}")
             click.echo(f"Error archiving @{account}: {e}")
 
 

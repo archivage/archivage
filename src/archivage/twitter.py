@@ -9,6 +9,7 @@ import httpx
 from pathlib import Path
 from http.cookiejar import MozillaCookieJar
 from .transaction import TransactionId
+from .log import logger
 
 
 # Twitter's public bearer token (used by web client)
@@ -134,15 +135,15 @@ class TwitterClient:
 
     def _initTransaction(self):
         """Initialize transaction ID generator."""
-        # Fetch homepage without API headers
         homepage_client = httpx.Client(
             cookies=dict(self.client.cookies),
             timeout=30.0,
             follow_redirects=True,
         )
         try:
+            logger.debug("GET https://x.com/ (homepage)")
             resp = homepage_client.get("https://x.com/")
-            homepage = resp.text
+            logger.debug(f"Homepage: {resp.status_code}, {len(resp.text)} bytes")
 
             # Transfer cookies from homepage response
             for name, value in resp.cookies.items():
@@ -150,10 +151,13 @@ class TwitterClient:
 
             # Initialize transaction ID generator
             self.transaction = TransactionId()
-            self.transaction.initialize(
-                homepage,
-                lambda url: self.client.get(url).text
-            )
+            def fetchJs(url):
+                logger.debug(f"GET {url[:80]}")
+                text = self.client.get(url).text
+                logger.debug(f"JS: {len(text)} bytes")
+                return text
+            self.transaction.initialize(resp.text, fetchJs)
+            logger.debug("Transaction ID initialized")
 
             # Update csrf token if changed
             if "ct0" in self.client.cookies:
@@ -161,7 +165,7 @@ class TwitterClient:
                 self.client.headers["x-csrf-token"] = self.csrf_token
 
         except Exception as e:
-            print(f"Warning: Transaction ID init failed: {e}")
+            logger.warning(f"Transaction ID init failed: {e}")
             self.transaction = None
         finally:
             homepage_client.close()
@@ -187,7 +191,9 @@ class TwitterClient:
             if txn_id:
                 headers["x-client-transaction-id"] = txn_id
 
+            logger.debug(f"GET {endpoint}")
             response = self.client.get(url, params=params, headers=headers)
+            logger.debug(f"Response: {response.status_code}")
 
             # Update csrf token if changed
             if "ct0" in response.cookies:
@@ -199,7 +205,7 @@ class TwitterClient:
             if remaining < 5:
                 reset_time = int(response.headers.get("x-rate-limit-reset", 0))
                 sleep_time = max(reset_time - time.time(), 60)
-                print(f"Rate limited, sleeping {sleep_time:.0f}s...")
+                logger.info(f"Rate limit low ({remaining}), sleeping {sleep_time:.0f}s")
                 time.sleep(sleep_time)
                 continue
 
@@ -208,11 +214,11 @@ class TwitterClient:
 
             if response.status_code == 429:
                 sleep_time = 60 * (2 ** attempt) + random.randint(0, 30)
-                print(f"429 Too Many Requests, sleeping {sleep_time}s...")
+                logger.warning(f"429 Too Many Requests, sleeping {sleep_time}s")
                 time.sleep(sleep_time)
                 continue
 
-            print(f"Error {response.status_code}: {response.text[:200]}")
+            logger.error(f"HTTP {response.status_code}: {response.text[:200]}")
             if attempt < max_retries - 1:
                 time.sleep(5 * (attempt + 1))
             else:
@@ -222,6 +228,7 @@ class TwitterClient:
 
     def getUserId(self, screen_name: str) -> str:
         """Get user ID from screen name."""
+        logger.info(f"Looking up @{screen_name}")
         variables = {
             "screen_name": screen_name,
             "withGrokTranslatedBio": False,
@@ -273,8 +280,8 @@ class TwitterClient:
             else:
                 raise KeyError("No timeline in response")
         except (KeyError, TypeError) as e:
-            print(f"Unexpected response structure: {e}")
-            print(json.dumps(data, indent=2)[:1000])
+            logger.error(f"Unexpected response structure: {e}")
+            logger.debug(json.dumps(data, indent=2)[:1000])
             return [], None
 
         tweets = []
