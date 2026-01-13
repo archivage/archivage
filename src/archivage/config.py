@@ -1,0 +1,65 @@
+"""
+Configuration management for archivage.
+"""
+
+import tomllib
+from pathlib import Path
+
+
+CONFIG_FILE = Path.home() / ".config/archivage/config.toml"
+
+_config = None
+
+
+def loadConfig() -> dict:
+    """Load config from TOML file, with defaults."""
+    global _config
+    if _config is not None:
+        return _config
+
+    defaults = {
+        "archive_dir": str(Path.home() / "Archive"),
+        "twitter": {
+            "cookies": str(Path.home() / "Archive/.gallery-dl/x.obteneur.cookies.txt"),
+            "accounts": str(Path.home() / ".config/archivage/twitter/accounts.txt"),
+        },
+    }
+
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "rb") as f:
+            user_config = tomllib.load(f)
+        # Merge user config into defaults
+        _config = _mergeConfig(defaults, user_config)
+    else:
+        _config = defaults
+
+    return _config
+
+
+def _mergeConfig(defaults: dict, overrides: dict) -> dict:
+    """Deep merge overrides into defaults."""
+    result = defaults.copy()
+    for key, value in overrides.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _mergeConfig(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def getArchiveDir() -> Path:
+    """Get archive directory."""
+    config = loadConfig()
+    return Path(config["archive_dir"]).expanduser()
+
+
+def getTwitterCookies() -> Path:
+    """Get Twitter cookies file path."""
+    config = loadConfig()
+    return Path(config["twitter"]["cookies"]).expanduser()
+
+
+def getTwitterAccounts() -> Path:
+    """Get Twitter accounts file path."""
+    config = loadConfig()
+    return Path(config["twitter"]["accounts"]).expanduser()
