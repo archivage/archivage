@@ -2,6 +2,7 @@
 CLI entry point for archivage.
 """
 
+import os
 import sys
 from pathlib import Path
 import click
@@ -170,6 +171,33 @@ def twitter_digest(accounts):
 def sync(ctx):
     """Sync all platforms (currently: twitter)."""
     ctx.invoke(twitter_sync, accounts=())
+
+
+@cli.command("completion")
+@click.argument("shell", type=click.Choice(["bash", "zsh"]), required=False)
+def completion(shell):
+    """Generate shell completion script.
+
+    \b
+    To activate:
+    • archivage completion bash | sudo tee /etc/bash_completion.d/archivage
+    • archivage completion zsh | sudo tee /usr/local/share/zsh/site-functions/_archivage
+    """
+    if shell is None:
+        detected = os.path.realpath(f"/proc/{os.getppid()}/exe").split("/")[-1]
+        if detected == "bash":
+            click.echo("archivage completion bash | sudo tee /etc/bash_completion.d/archivage")
+        elif detected == "zsh":
+            click.echo("archivage completion zsh | sudo tee /usr/local/share/zsh/site-functions/_archivage")
+        return
+
+    os.environ["_ARCHIVAGE_COMPLETE"] = f"{shell}_source"
+    script = cli._main_shell_completion(
+        ctx_args=None,
+        prog_name="archivage",
+        complete_var="_ARCHIVAGE_COMPLETE"
+    )
+    click.echo(script.strip())
 
 
 def main():
