@@ -5,7 +5,6 @@ description = "Archive Twitter timelines to JSONL.gz"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
-    "gallery-dl>=1.30.0",
     "click>=8.3.1",
 ]
 

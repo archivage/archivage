@@ -1,21 +1,15 @@
 """
 Twitter GraphQL API client for archiving.
-
-Uses gallery-dl's transaction_id module for anti-bot bypassing.
 """
 
 import json
 import time
 import random
-import hashlib
 import httpx
 from pathlib import Path
 from http.cookiejar import MozillaCookieJar
+from .transaction import TransactionId
 
-try:
-    from gallery_dl import transaction_id
-except ImportError:
-    transaction_id = None
 
 # Twitter's public bearer token (used by web client)
 BEARER_TOKEN = (
@@ -87,26 +81,6 @@ FEATURES_PAGINATION = {
 }
 
 
-class _NullLogger:
-    """Minimal logger that discards messages."""
-    def error(self, msg, *args): pass
-    def warning(self, msg, *args): pass
-    def info(self, msg, *args): pass
-    def debug(self, msg, *args): pass
-
-
-class _HttpxAdapter:
-    """Adapter to make httpx client work with gallery-dl's transaction_id module."""
-
-    def __init__(self, client: httpx.Client):
-        self._client = client
-        self.log = _NullLogger()
-
-    def request(self, url: str):
-        """Make GET request and return response with .text attribute."""
-        return self._client.get(url)
-
-
 class TwitterClient:
     """HTTP client for Twitter GraphQL API."""
 
@@ -115,7 +89,7 @@ class TwitterClient:
         self.cookies_path = cookies_path
         self.client = None
         self.csrf_token = None
-        self.client_transaction = None
+        self.transaction = None
 
     def _loadCookies(self) -> dict[str, str]:
         """Load cookies from Netscape format file."""
@@ -156,89 +130,48 @@ class TwitterClient:
             follow_redirects=True,
         )
 
-        # Initialize client transaction for anti-bot bypass
         self._initTransaction()
 
     def _initTransaction(self):
-        """Initialize client transaction ID generator."""
-        if transaction_id is None:
-            print("Warning: gallery-dl not installed, transaction ID disabled")
-            return
-
-        # Make homepage request without API headers (use a separate client)
+        """Initialize transaction ID generator."""
+        # Fetch homepage without API headers
         homepage_client = httpx.Client(
             cookies=dict(self.client.cookies),
             timeout=30.0,
             follow_redirects=True,
         )
-        resp = homepage_client.get("https://x.com/")
-        homepage = resp.text
+        try:
+            resp = homepage_client.get("https://x.com/")
+            homepage = resp.text
 
-        # Transfer cookies from homepage response to main client
-        for name, value in resp.cookies.items():
-            self.client.cookies.set(name, value)
+            # Transfer cookies from homepage response
+            for name, value in resp.cookies.items():
+                self.client.cookies.set(name, value)
 
-        homepage_client.close()
+            # Initialize transaction ID generator
+            self.transaction = TransactionId()
+            self.transaction.initialize(
+                homepage,
+                lambda url: self.client.get(url).text
+            )
 
-        # Extract verification key
-        import re
-        from gallery_dl import text
+            # Update csrf token if changed
+            if "ct0" in self.client.cookies:
+                self.csrf_token = self.client.cookies["ct0"]
+                self.client.headers["x-csrf-token"] = self.csrf_token
 
-        # Try different quote styles
-        pos = homepage.find('name="twitter-site-verification"')
-        if pos == -1:
-            pos = homepage.find("name='twitter-site-verification'")
-        if pos == -1:
-            # Try without quotes
-            idx = homepage.find("twitter-site-verification")
-            print(f"Found 'twitter-site-verification' at index: {idx}")
-            if idx > 0:
-                print(f"Context: ...{homepage[max(0,idx-50):idx+100]}...")
-            print("Warning: Could not find verification key")
-            return
-        beg = homepage.rfind("<", 0, pos)
-        end = homepage.find(">", pos)
-        key = text.extr(homepage[beg:end], 'content="', '"')
-
-        # Extract ondemand.s for JS URL
-        ondemand_s = text.extr(homepage, '"ondemand.s":"', '"')
-        if not ondemand_s:
-            print("Warning: Could not find ondemand.s")
-            return
-
-        # Fetch JS and extract indices
-        js_url = f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{ondemand_s}a.js"
-        js_text = self.client.get(js_url).text
-        pattern = re.compile(r"\(\w\[(\d\d?)\],\s*16\)")
-        indices = [int(i) for i in pattern.findall(js_text)]
-
-        if not indices:
-            print("Warning: Could not extract indices from JS")
-            return
-
-        # Extract animation frames
-        frames = list(text.extract_iter(homepage, 'id="loading-x-anim-', "</svg>"))
-
-        # Create transaction generator
-        self.client_transaction = transaction_id.ClientTransaction()
-        import binascii
-        self.client_transaction.key_bytes = binascii.a2b_base64(key)
-        self.client_transaction.animation_key = self.client_transaction._calculate_animation_key(
-            frames, indices[0], self.client_transaction.key_bytes, indices[1:]
-        )
-
-        # Update csrf token from cookies (may have changed from homepage request)
-        if "ct0" in self.client.cookies:
-            self.csrf_token = self.client.cookies["ct0"]
-            self.client.headers["x-csrf-token"] = self.csrf_token
+        except Exception as e:
+            print(f"Warning: Transaction ID init failed: {e}")
+            self.transaction = None
+        finally:
+            homepage_client.close()
 
     def _getTransactionId(self, url: str, method: str = "GET") -> str | None:
         """Generate transaction ID for request."""
-        if self.client_transaction is None:
+        if self.transaction is None:
             return None
         path = url[url.find("/", 8):]  # Extract path from URL
-        txn_bytes = self.client_transaction.generate_transaction_id(method, path)
-        return txn_bytes.decode("ascii") if txn_bytes else None
+        return self.transaction.generate(method, path)
 
     def _call(self, endpoint: str, params: dict) -> dict:
         """Make API request with retry logic."""
@@ -249,7 +182,6 @@ class TwitterClient:
         max_retries = 5
 
         for attempt in range(max_retries):
-            # Generate transaction ID for each request
             txn_id = self._getTransactionId(url)
             headers = {}
             if txn_id:
@@ -280,7 +212,6 @@ class TwitterClient:
                 time.sleep(sleep_time)
                 continue
 
-            # Other errors
             print(f"Error {response.status_code}: {response.text[:200]}")
             if attempt < max_retries - 1:
                 time.sleep(5 * (attempt + 1))
@@ -356,7 +287,6 @@ class TwitterClient:
                 for entry in instr.get("entries", []):
                     entry_id = entry.get("entryId", "")
 
-                    # Tweet entries
                     if entry_id.startswith("tweet-"):
                         content = entry.get("content", {})
                         if "itemContent" in content:
@@ -366,7 +296,6 @@ class TwitterClient:
                             if tweet_result:
                                 tweets.append(tweet_result)
 
-                    # Cursor entries
                     elif entry_id.startswith("cursor-bottom-"):
                         next_cursor = entry.get("content", {}).get("value")
 
