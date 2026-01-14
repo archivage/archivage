@@ -5,6 +5,7 @@ Twitter GraphQL API client for archiving.
 import json
 import time
 import random
+from datetime import datetime
 import httpx
 from pathlib import Path
 from http.cookiejar import MozillaCookieJar
@@ -24,6 +25,7 @@ ENDPOINTS = {
     "user_by_screen_name": "/graphql/ck5KkZ8t5cOmoLssopN99Q/UserByScreenName",
     "likes": "/graphql/TGEKkJG_meudeaFcqaxM-Q/Likes",
     "bookmarks": "/graphql/pLtjrO4ubNh996M_Cubwsg/Bookmarks",
+    "search": "/graphql/4fpceYZ6-YQCx_JSl_Cn_A/SearchTimeline",
 }
 
 # Features for UserByScreenName
@@ -205,7 +207,9 @@ class TwitterClient:
             if remaining < 5:
                 reset_time = int(response.headers.get("x-rate-limit-reset", 0))
                 sleep_time = max(reset_time - time.time(), 60)
+                resume_at = datetime.fromtimestamp(reset_time).strftime("%H:%M:%S")
                 logger.info(f"Rate limit low ({remaining}), sleeping {sleep_time:.0f}s")
+                print(f"  Rate limit low ({remaining}), sleeping {sleep_time/60:.1f}m (until {resume_at})")
                 time.sleep(sleep_time)
                 continue
 
@@ -214,7 +218,9 @@ class TwitterClient:
 
             if response.status_code == 429:
                 sleep_time = 60 * (2 ** attempt) + random.randint(0, 30)
+                resume_at = datetime.fromtimestamp(time.time() + sleep_time).strftime("%H:%M:%S")
                 logger.warning(f"429 Too Many Requests, sleeping {sleep_time}s")
+                print(f"  Rate limited (429), sleeping {sleep_time/60:.1f}m (until {resume_at})")
                 time.sleep(sleep_time)
                 continue
 
@@ -246,7 +252,8 @@ class TwitterClient:
         data = self._call(ENDPOINTS["user_by_screen_name"], params)
         return data["data"]["user"]["result"]["rest_id"]
 
-    def getUserTweets(self, user_id: str, cursor: str = None, count: int = 100):
+    def getUserTweets(self, user_id: str, cursor: str = None, count: int = 100,
+                       include_retweets: bool = False, _retry: bool = True):
         """
         Fetch a page of tweets from user timeline.
 
@@ -282,10 +289,17 @@ class TwitterClient:
         except (KeyError, TypeError) as e:
             logger.error(f"Unexpected response structure: {e}")
             logger.debug(json.dumps(data, indent=2)[:1000])
+            if _retry:
+                logger.warning("Retrying after malformed response")
+                time.sleep(2)
+                return self.getUserTweets(user_id, cursor, count, include_retweets, _retry=False)
             return [], None
 
         tweets = []
         next_cursor = None
+        stop_on_empty = True  # Default: stop if no tweets
+        instr_types = [i.get("type") for i in instructions]
+        logger.debug(f"Instructions: {instr_types}")
 
         for instr in instructions:
             instr_type = instr.get("type")
@@ -301,15 +315,159 @@ class TwitterClient:
                                 "tweet_results", {}
                             ).get("result")
                             if tweet_result:
+                                # Skip retweets unless configured to include
+                                if not include_retweets:
+                                    legacy = tweet_result.get("legacy", {})
+                                    if "retweeted_status_result" in legacy:
+                                        continue
                                 tweets.append(tweet_result)
 
                     elif entry_id.startswith("cursor-bottom-"):
-                        next_cursor = entry.get("content", {}).get("value")
+                        cursor_content = entry.get("content", {})
+                        # Check itemContent wrapper (some responses nest it)
+                        if "itemContent" in cursor_content:
+                            cursor_content = cursor_content["itemContent"]
+                        next_cursor = cursor_content.get("value")
+                        stop_on_empty = cursor_content.get("stopOnEmptyResponse", True)
+                        logger.debug(f"Cursor from TimelineAddEntries")
 
             elif instr_type == "TimelineReplaceEntry":
                 entry = instr.get("entry", {})
                 if entry.get("entryId", "").startswith("cursor-bottom-"):
-                    next_cursor = entry.get("content", {}).get("value")
+                    cursor_content = entry.get("content", {})
+                    if "itemContent" in cursor_content:
+                        cursor_content = cursor_content["itemContent"]
+                    next_cursor = cursor_content.get("value")
+                    stop_on_empty = cursor_content.get("stopOnEmptyResponse", True)
+                    logger.debug(f"Cursor from TimelineReplaceEntry")
+
+        # Detect definitive end of timeline
+        # Cursor prefix -1| or 0| indicates we've reached the end
+        is_end_cursor = (
+            next_cursor and next_cursor.startswith(("-1|", "0|"))
+        )
+
+        # Log cursor status
+        if next_cursor:
+            if is_end_cursor:
+                logger.info(f"End cursor received: {next_cursor[:40]}...")
+                next_cursor = None  # Signal end of timeline
+            else:
+                logger.debug(f"Next cursor: {next_cursor[:40]}...")
+                if not stop_on_empty:
+                    logger.debug("stopOnEmptyResponse=False, will continue even with no tweets")
+        elif tweets:
+            # Suspicious: got tweets but no cursor — retry once
+            if _retry:
+                logger.warning(
+                    f"Got {len(tweets)} tweets but no cursor — retrying once"
+                )
+                time.sleep(2)
+                return self.getUserTweets(user_id, cursor, count, include_retweets, _retry=False)
+            else:
+                logger.warning(
+                    f"Got {len(tweets)} tweets but no cursor after retry — stopping"
+                )
+        else:
+            logger.debug("No cursor, no tweets — end of timeline")
+
+        return tweets, next_cursor
+
+    def searchTweets(self, query: str, cursor: str = None, count: int = 20,
+                     include_retweets: bool = False, _retry: bool = True):
+        """
+        Search tweets using Twitter's Search API.
+
+        Query examples:
+          - "from:username" — tweets from user
+          - "from:username max_id:123" — tweets older than ID
+          - "from:username since_id:123" — tweets newer than ID
+
+        Returns (tweets, next_cursor) where next_cursor is None if no more pages.
+        """
+        variables = {
+            "rawQuery": query,
+            "count": count,
+            "querySource": "typed_query",
+            "product": "Latest",
+        }
+        if cursor:
+            variables["cursor"] = cursor
+
+        params = {
+            "variables": json.dumps(variables),
+            "features": json.dumps(FEATURES_PAGINATION),
+        }
+
+        data = self._call(ENDPOINTS["search"], params)
+
+        # Parse response
+        try:
+            result = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]
+            instructions = result["instructions"]
+        except (KeyError, TypeError) as e:
+            logger.error(f"Unexpected search response structure: {e}")
+            logger.debug(json.dumps(data, indent=2)[:1000])
+            if _retry:
+                logger.warning("Retrying after malformed response")
+                time.sleep(2)
+                return self.searchTweets(query, cursor, count, include_retweets, _retry=False)
+            return [], None
+
+        tweets = []
+        next_cursor = None
+        instr_types = [i.get("type") for i in instructions]
+        logger.debug(f"Search instructions: {instr_types}")
+
+        for instr in instructions:
+            instr_type = instr.get("type")
+
+            if instr_type == "TimelineAddEntries":
+                for entry in instr.get("entries", []):
+                    entry_id = entry.get("entryId", "")
+
+                    if entry_id.startswith("tweet-"):
+                        content = entry.get("content", {})
+                        if "itemContent" in content:
+                            tweet_result = content["itemContent"].get(
+                                "tweet_results", {}
+                            ).get("result")
+                            if tweet_result:
+                                # Skip retweets unless configured to include
+                                if not include_retweets:
+                                    legacy = tweet_result.get("legacy", {})
+                                    if "retweeted_status_result" in legacy:
+                                        continue
+                                tweets.append(tweet_result)
+
+                    elif entry_id.startswith("cursor-bottom-"):
+                        cursor_content = entry.get("content", {})
+                        if "itemContent" in cursor_content:
+                            cursor_content = cursor_content["itemContent"]
+                        next_cursor = cursor_content.get("value")
+                        logger.debug("Cursor from search TimelineAddEntries")
+
+            elif instr_type == "TimelineReplaceEntry":
+                entry = instr.get("entry", {})
+                if entry.get("entryId", "").startswith("cursor-bottom-"):
+                    cursor_content = entry.get("content", {})
+                    if "itemContent" in cursor_content:
+                        cursor_content = cursor_content["itemContent"]
+                    next_cursor = cursor_content.get("value")
+                    logger.debug("Cursor from search TimelineReplaceEntry")
+
+        # Log cursor status
+        if next_cursor:
+            logger.debug(f"Search next cursor: {next_cursor[:40]}...")
+        elif tweets:
+            if _retry:
+                logger.warning(f"Search got {len(tweets)} tweets but no cursor — retrying")
+                time.sleep(2)
+                return self.searchTweets(query, cursor, count, include_retweets, _retry=False)
+            else:
+                logger.warning(f"Search got {len(tweets)} tweets but no cursor — stopping")
+        else:
+            logger.debug("Search: no cursor, no tweets — end of results")
 
         return tweets, next_cursor
 

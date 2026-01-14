@@ -22,6 +22,7 @@ def loadConfig() -> dict:
         "twitter": {
             "cookies": str(Path.home() / "Archive/.gallery-dl/x.obteneur.cookies.txt"),
             "accounts": str(Path.home() / ".config/archivage/twitter/accounts.txt"),
+            "include_retweets": False,
         },
     }
 
@@ -63,3 +64,9 @@ def getTwitterAccounts() -> Path:
     """Get Twitter accounts file path."""
     config = loadConfig()
     return Path(config["twitter"]["accounts"]).expanduser()
+
+
+def getTwitterIncludeRetweets() -> bool:
+    """Get whether to include retweets (default: False)."""
+    config = loadConfig()
+    return config["twitter"].get("include_retweets", False)
