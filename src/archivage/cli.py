@@ -143,15 +143,30 @@ def syncFull(client, account: str, user_id: str, output_path: Path,
             else:
                 api_cursor = next_cursor
 
-        # End of results (both methods exhausted)
-        if not next_cursor and (using_search or not oldest_id):
-            print("  End of timeline.")
-            logger.info("Sync complete: end of timeline")
-            setAccountState(
-                account, cursor="", newest_id=newest_id, oldest_id=oldest_id,
-                status="complete"
-            )
-            break
+        # Current method exhausted - try switching before declaring end
+        if not next_cursor:
+            if using_search and api_cursor:
+                # Search exhausted but UserTweets still has cursor
+                print("  Search exhausted, switching to UserTweets")
+                logger.info("Search cursor exhausted, switching to UserTweets")
+                using_search = False
+                continue
+            elif not using_search and oldest_id:
+                # UserTweets exhausted but we can try Search
+                print("  UserTweets exhausted, switching to Search")
+                logger.info("UserTweets cursor exhausted, switching to Search")
+                using_search = True
+                search_cursor = None
+                continue
+            else:
+                # Both methods exhausted
+                print("  End of timeline.")
+                logger.info("Sync complete: end of timeline")
+                setAccountState(
+                    account, cursor="", newest_id=newest_id, oldest_id=oldest_id,
+                    status="complete"
+                )
+                break
 
         # Too many empty pages — give up
         if empty_pages >= 20:
