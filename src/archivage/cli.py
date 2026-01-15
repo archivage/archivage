@@ -48,6 +48,7 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path, full: bo
         prev_newest_id = state.get("newest_id")
         prev_oldest_id = state.get("oldest_id")
         resume_cursor = state.get("cursor")
+        status = state.get("status")
 
         # Load existing IDs for dedup
         existing_ids = loadExistingIds(output_path)
@@ -58,8 +59,13 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path, full: bo
         # Decide sync mode
         if full or not prev_newest_id:
             # Full sync: use UserTweets API, go backwards
+            # Can resume from cursor, or from oldest_id if in_progress
+            resume_from_oldest = None
+            if not full and status == "in_progress" and not resume_cursor and prev_oldest_id:
+                resume_from_oldest = prev_oldest_id
             syncFull(client, account, user_id, output_path, existing_ids,
-                     include_retweets, resume_cursor if not full else None)
+                     include_retweets, resume_cursor if not full else None,
+                     resume_from_oldest)
         else:
             # Incremental sync: use Search API with since_id
             syncIncremental(client, account, output_path, existing_ids,
@@ -70,7 +76,8 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path, full: bo
 
 
 def syncFull(client, account: str, user_id: str, output_path: Path,
-             existing_ids: set, include_retweets: bool, resume_cursor: str = None):
+             existing_ids: set, include_retweets: bool, resume_cursor: str = None,
+             resume_from_oldest: str = None):
     """Full sync using UserTweets API, with Search API fallback on gaps."""
     total_new = 0
     page = 0
@@ -82,6 +89,13 @@ def syncFull(client, account: str, user_id: str, output_path: Path,
     api_cursor = resume_cursor
     search_cursor = None
     using_search = False
+
+    # Resume from oldest_id: start directly with Search API
+    if resume_from_oldest:
+        oldest_id = resume_from_oldest
+        using_search = True
+        print(f"  Resuming from oldest_id (Search API from {oldest_id})")
+        logger.info(f"Resuming with Search API from oldest_id={oldest_id}")
 
     setAccountState(account, status="in_progress")
 
