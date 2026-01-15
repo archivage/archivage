@@ -57,15 +57,16 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path, full: bo
         include_retweets = getTwitterIncludeRetweets()
 
         # Decide sync mode
-        if full or not prev_newest_id:
+        # Resume from oldest_id if in_progress without cursor
+        should_resume_from_oldest = (status == "in_progress" and not resume_cursor and prev_oldest_id)
+
+        if full or not prev_newest_id or should_resume_from_oldest:
             # Full sync: use UserTweets API, go backwards
-            # Can resume from cursor, or from oldest_id if in_progress
-            resume_from_oldest = None
-            if not full and status == "in_progress" and not resume_cursor and prev_oldest_id:
-                resume_from_oldest = prev_oldest_id
+            # Or resume from oldest_id if in_progress
             syncFull(client, account, user_id, output_path, existing_ids,
-                     include_retweets, resume_cursor if not full else None,
-                     resume_from_oldest)
+                     include_retweets,
+                     resume_cursor if not full else None,
+                     prev_oldest_id if should_resume_from_oldest else None)
         else:
             # Incremental sync: use Search API with since_id
             syncIncremental(client, account, output_path, existing_ids,
