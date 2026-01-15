@@ -186,6 +186,7 @@ def syncIncremental(client, account: str, output_path: Path, existing_ids: set,
     """Incremental sync using Search API with since_id."""
     total_new = 0
     page = 0
+    empty_pages = 0
     cursor = None
     newest_id = since_id  # Start with previous newest, update as we go
 
@@ -202,6 +203,7 @@ def syncIncremental(client, account: str, output_path: Path, existing_ids: set,
         )
 
         if tweets:
+            empty_pages = 0
             new_count = appendTweets(output_path, tweets, existing_ids)
             total_new += new_count
 
@@ -215,12 +217,20 @@ def syncIncremental(client, account: str, output_path: Path, existing_ids: set,
             print(f"  Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
             logger.debug(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
         else:
-            print(f"  Page {page}: 0 tweets")
-            logger.debug(f"Page {page}: 0 tweets")
+            empty_pages += 1
+            print(f"  Page {page}: 0 tweets (empty {empty_pages}/5)")
+            logger.debug(f"Page {page}: 0 tweets (empty {empty_pages}/5)")
 
         if not next_cursor:
             print("  Caught up.")
             logger.info("Incremental sync complete")
+            setAccountState(account, cursor="", newest_id=newest_id, status="complete")
+            break
+
+        # For incremental sync, 5 empty pages means we're done
+        if empty_pages >= 5:
+            print("  Caught up (5 empty pages).")
+            logger.info("Incremental sync complete (5 empty pages)")
             setAccountState(account, cursor="", newest_id=newest_id, status="complete")
             break
 
