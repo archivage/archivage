@@ -4,6 +4,7 @@ CLI entry point for archivage.
 
 import os
 import sys
+import signal
 from pathlib import Path
 import click
 from .twitter import TwitterClient
@@ -11,6 +12,35 @@ from .storage import appendTweets, loadExistingIds, countTweets, getTweetId
 from .state import getAccountState, setAccountState, parseTweetDate
 from .config import getArchiveDir, getTwitterCookies, getTwitterAccounts, getTwitterIncludeRetweets
 from .log import setupLogging, logger
+
+
+# Track current sync state for graceful interrupt handling
+_sync_context = {
+    "account": None,
+    "cursor": None,
+    "newest_id": None,
+    "oldest_id": None,
+    "active": False,
+}
+
+
+def _handleInterrupt(signum, frame):
+    """Save state and exit gracefully on Ctrl-C."""
+    ctx = _sync_context
+    if ctx["active"] and ctx["account"]:
+        print("\n  Interrupted. Saving state...")
+        logger.info(f"Interrupted: saving state for @{ctx['account']}")
+        setAccountState(
+            ctx["account"],
+            cursor=ctx["cursor"] or "",
+            newest_id=ctx["newest_id"],
+            oldest_id=ctx["oldest_id"],
+        )
+        print(f"  State saved. Run sync again to resume.")
+    sys.exit(130)  # Standard exit code for SIGINT
+
+
+signal.signal(signal.SIGINT, _handleInterrupt)
 
 
 def formatDateRange(tweets: list) -> str:
@@ -66,7 +96,8 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path, full: bo
             syncFull(client, account, user_id, output_path, existing_ids,
                      include_retweets,
                      resume_cursor if not full else None,
-                     prev_oldest_id if should_resume_from_oldest else None)
+                     prev_oldest_id if should_resume_from_oldest else None,
+                     prev_newest_id if should_resume_from_oldest else None)
         else:
             # Incremental sync: use Search API with since_id
             syncIncremental(client, account, output_path, existing_ids,
@@ -78,13 +109,13 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path, full: bo
 
 def syncFull(client, account: str, user_id: str, output_path: Path,
              existing_ids: set, include_retweets: bool, resume_cursor: str = None,
-             resume_from_oldest: str = None):
+             resume_from_oldest: str = None, preserve_newest_id: str = None):
     """Full sync using UserTweets API, with Search API fallback on gaps."""
     total_new = 0
     page = 0
     empty_pages = 0
-    newest_id = None  # First tweet we see (most recent)
-    oldest_id = None  # Last tweet we see (oldest)
+    newest_id = preserve_newest_id  # Preserve existing newest_id when resuming
+    oldest_id = None
 
     # Track cursors for both methods separately
     api_cursor = resume_cursor
@@ -99,6 +130,13 @@ def syncFull(client, account: str, user_id: str, output_path: Path,
         logger.info(f"Resuming with Search API from oldest_id={oldest_id}")
 
     setAccountState(account, status="in_progress")
+
+    # Set up interrupt context
+    _sync_context["account"] = account
+    _sync_context["cursor"] = api_cursor or search_cursor
+    _sync_context["newest_id"] = newest_id
+    _sync_context["oldest_id"] = oldest_id
+    _sync_context["active"] = True
 
     if resume_cursor:
         print("  Resuming from saved cursor...")
@@ -144,9 +182,12 @@ def syncFull(client, account: str, user_id: str, output_path: Path,
             else:
                 api_cursor = next_cursor
 
-            # Save progress
+            # Save progress and update interrupt context
             if next_cursor:
                 setAccountState(account, cursor=next_cursor, newest_id=newest_id)
+            _sync_context["cursor"] = next_cursor
+            _sync_context["newest_id"] = newest_id
+            _sync_context["oldest_id"] = oldest_id
         else:
             empty_pages += 1
             print(f"  Page {page} ({method}): 0 tweets (empty {empty_pages}/20)")
@@ -160,13 +201,17 @@ def syncFull(client, account: str, user_id: str, output_path: Path,
 
         # Current method exhausted - try switching before declaring end
         if not next_cursor:
-            if using_search and api_cursor:
-                # Search exhausted but UserTweets still has cursor
-                print("  Search exhausted, switching to UserTweets")
-                logger.info("Search cursor exhausted, switching to UserTweets")
+            if using_search:
+                # Search exhausted - try UserTweets (from cursor or from start)
+                if api_cursor:
+                    print("  Search exhausted, resuming UserTweets")
+                    logger.info("Search cursor exhausted, resuming UserTweets")
+                else:
+                    print("  Search exhausted, trying UserTweets from start")
+                    logger.info("Search cursor exhausted, trying UserTweets from start")
                 using_search = False
                 continue
-            elif not using_search and oldest_id:
+            elif oldest_id:
                 # UserTweets exhausted but we can try Search
                 print("  UserTweets exhausted, switching to Search")
                 logger.info("UserTweets cursor exhausted, switching to Search")
@@ -188,6 +233,7 @@ def syncFull(client, account: str, user_id: str, output_path: Path,
             print(f"  Pausing: {empty_pages} consecutive empty pages")
             logger.warning(f"Sync pause: {empty_pages} empty pages")
             setAccountState(account, cursor=api_cursor, newest_id=newest_id)
+            _sync_context["active"] = False
             total = countTweets(output_path)
             print(f"  New: {total_new}, Total: {total}")
             print(f"  ⚠ Archive incomplete — will resume next sync")
@@ -206,6 +252,7 @@ def syncFull(client, account: str, user_id: str, output_path: Path,
                 search_cursor = None  # Fresh search with max_id
                 logger.debug(f"Switching to Search API with max_id:{oldest_id}")
 
+    _sync_context["active"] = False
     total = countTweets(output_path)
     print(f"  New: {total_new}, Total: {total}")
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
@@ -223,6 +270,13 @@ def syncIncremental(client, account: str, output_path: Path, existing_ids: set,
     print(f"  Incremental sync (since_id: {since_id})")
     logger.info(f"Incremental sync since_id={since_id}")
     setAccountState(account, status="in_progress")
+
+    # Set up interrupt context
+    _sync_context["account"] = account
+    _sync_context["cursor"] = None
+    _sync_context["newest_id"] = newest_id
+    _sync_context["oldest_id"] = None  # Not tracked in incremental
+    _sync_context["active"] = True
 
     query = f"from:{account} since_id:{since_id}"
 
@@ -246,10 +300,16 @@ def syncIncremental(client, account: str, output_path: Path, existing_ids: set,
             date_range = formatDateRange(tweets)
             print(f"  Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
             logger.debug(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+
+            # Update interrupt context
+            _sync_context["newest_id"] = newest_id
         else:
             empty_pages += 1
             print(f"  Page {page}: 0 tweets (empty {empty_pages}/5)")
             logger.debug(f"Page {page}: 0 tweets (empty {empty_pages}/5)")
+
+        # Update cursor in context
+        _sync_context["cursor"] = next_cursor
 
         if not next_cursor:
             print("  Caught up.")
@@ -266,6 +326,7 @@ def syncIncremental(client, account: str, output_path: Path, existing_ids: set,
 
         cursor = next_cursor
 
+    _sync_context["active"] = False
     total = countTweets(output_path)
     print(f"  New: {total_new}, Total: {total}")
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
