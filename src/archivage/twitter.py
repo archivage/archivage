@@ -401,6 +401,18 @@ class TwitterClient:
 
         data = self._call(ENDPOINTS["search"], params)
 
+        # Check for server errors (e.g., TimeoutError code 29)
+        if "errors" in data:
+            for err in data["errors"]:
+                err_name = err.get("name", "")
+                err_code = err.get("code", 0)
+                logger.warning(f"Search error: {err_name} (code {err_code})")
+                # Retry on server-side errors
+                if err.get("source") == "Server" and _retry:
+                    logger.info("Server error, retrying after 5s...")
+                    time.sleep(5)
+                    return self.searchTweets(query, cursor, count, include_retweets, _retry=False)
+
         # Parse response
         try:
             result = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]
@@ -410,9 +422,10 @@ class TwitterClient:
             logger.debug(json.dumps(data, indent=2)[:1000])
             if _retry:
                 logger.warning("Retrying after malformed response")
-                time.sleep(2)
+                time.sleep(5)
                 return self.searchTweets(query, cursor, count, include_retweets, _retry=False)
-            return [], None
+            # Signal retriable error (not end of timeline)
+            raise Exception(f"Search API error: {e}")
 
         tweets = []
         next_cursor = None

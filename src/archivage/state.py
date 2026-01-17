@@ -3,8 +3,7 @@ State persistence for archivage.
 
 State tracks:
 - newest_id: most recent tweet ID archived
-- oldest_id: oldest tweet ID archived (invariant: all tweets between these are archived)
-- cursor: for resume within a sync
+- oldest_id: oldest tweet ID archived
 - status: complete/in_progress
 """
 
@@ -38,9 +37,9 @@ def getAccountState(account: str) -> dict:
     return state.get("accounts", {}).get(account, {})
 
 
-def setAccountState(account: str, cursor: str = None, newest_id: str = None,
-                    oldest_id: str = None, status: str = None):
-    """Update state for a specific account. Pass empty string to clear a field."""
+def setAccountState(account: str, newest_id: str = None, oldest_id: str = None,
+                    status: str = None):
+    """Update state for a specific account."""
     state = loadState()
     if "accounts" not in state:
         state["accounts"] = {}
@@ -49,34 +48,19 @@ def setAccountState(account: str, cursor: str = None, newest_id: str = None,
 
     acc = state["accounts"][account]
 
-    # Handle cursor (empty string clears it)
-    if cursor is not None:
-        if cursor:
-            acc["cursor"] = cursor
-        elif "cursor" in acc:
-            del acc["cursor"]
-
-    # Handle newest_id
     if newest_id is not None:
-        if newest_id:
-            acc["newest_id"] = newest_id
-        elif "newest_id" in acc:
-            del acc["newest_id"]
+        acc["newest_id"] = newest_id
 
-    # Handle oldest_id
     if oldest_id is not None:
-        if oldest_id:
-            acc["oldest_id"] = oldest_id
-        elif "oldest_id" in acc:
-            del acc["oldest_id"]
+        acc["oldest_id"] = oldest_id
 
-    # Handle status
     if status is not None:
         acc["status"] = status
 
-    # Clean up legacy field
-    if "archived_until" in acc:
-        del acc["archived_until"]
+    # Clean up legacy fields
+    for field in ["archived_until", "cursor", "method"]:
+        if field in acc:
+            del acc[field]
 
     saveState(state)
 
