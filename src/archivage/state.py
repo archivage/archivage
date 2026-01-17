@@ -38,7 +38,7 @@ def getAccountState(account: str) -> dict:
 
 
 def setAccountState(account: str, newest_id: str = None, oldest_id: str = None,
-                    status: str = None):
+                    status: str = None, count: int = None):
     """Update state for a specific account."""
     state = loadState()
     if "accounts" not in state:
@@ -56,6 +56,9 @@ def setAccountState(account: str, newest_id: str = None, oldest_id: str = None,
 
     if status is not None:
         acc["status"] = status
+
+    if count is not None:
+        acc["count"] = count
 
     # Clean up legacy fields
     for field in ["archived_until", "cursor", "method"]:

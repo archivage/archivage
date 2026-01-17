@@ -181,6 +181,7 @@ def syncBackwards(client, account: str, output_path: Path, existing_ids: set,
 
     _sync_context["active"] = False
     total = countTweets(output_path)
+    setAccountState(account, count=total)
     print(f"  New: {total_new}, Total: {total}")
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
 
@@ -249,6 +250,7 @@ def syncForward(client, account: str, output_path: Path, existing_ids: set,
 
     _sync_context["active"] = False
     total = countTweets(output_path)
+    setAccountState(account, count=total)
     print(f"  New: {total_new}, Total: {total}")
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
 
@@ -331,6 +333,89 @@ def twitter_digest(accounts):
             click.echo(f"  {account} → {path}")
         else:
             click.echo(f"  {account}: no archive or empty")
+
+
+@twitter.command("repair")
+def twitter_repair():
+    """Rebuild state from archive files (find oldest/newest IDs)."""
+    import gzip
+
+    archive_dir = getArchiveDir() / "twitter/archive"
+    if not archive_dir.exists():
+        click.echo(f"No archive directory: {archive_dir}")
+        return
+
+    archives = sorted(archive_dir.glob("*.jsonl.gz"))
+    if not archives:
+        click.echo("No archives found")
+        return
+
+    click.echo(f"Scanning {len(archives)} archives...")
+
+    for path in archives:
+        account = path.stem.replace(".jsonl", "")
+        oldest_id = None
+        newest_id = None
+        count = 0
+
+        with gzip.open(path, "rt") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    tweet = __import__("json").loads(line)
+                    tid = getTweetId(tweet)
+                    if tid:
+                        count += 1
+                        if oldest_id is None or tid < oldest_id:
+                            oldest_id = tid
+                        if newest_id is None or tid > newest_id:
+                            newest_id = tid
+                except Exception:
+                    continue
+
+        if count == 0:
+            click.echo(f"  {account}: empty, skipping")
+            continue
+
+        state = getAccountState(account)
+        if state.get("newest_id") and state.get("oldest_id"):
+            # Still update count if missing
+            if not state.get("count"):
+                setAccountState(account, count=count)
+                click.echo(f"  {account}: updated count to {count:,}")
+            else:
+                click.echo(f"  {account}: already has state, skipping")
+            continue
+
+        setAccountState(account, newest_id=newest_id, oldest_id=oldest_id,
+                        status="in_progress", count=count)
+        click.echo(f"  {account}: {count:,} tweets, set in_progress")
+
+
+@twitter.command("status")
+def twitter_status():
+    """Show sync status for all accounts."""
+    accounts = list(dict.fromkeys(loadAccountsList()))  # dedupe, preserve order
+
+    if not accounts:
+        click.echo(f"No accounts in {getTwitterAccounts()}")
+        return
+
+    # Gather data from state (fast, no file I/O)
+    rows = []
+    for account in accounts:
+        state = getAccountState(account)
+        status = state.get("status", "-")
+        tweets = state.get("count", 0)
+        rows.append((account, tweets, status))
+
+    # Column widths
+    max_name   = max(len(r[0]) for r in rows)
+    max_tweets = max(len(f"{r[1]:,}") for r in rows)
+
+    for account, tweets, status in rows:
+        click.echo(f"{account:<{max_name}}  {tweets:>{max_tweets},}  {status}")
 
 
 @cli.command("sync")
