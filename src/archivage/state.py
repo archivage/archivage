@@ -10,24 +10,28 @@ State tracks:
 import json
 from pathlib import Path
 from datetime import datetime
+from .config import getTwitterStateDir
 
 
-STATE_DIR = Path.home() / ".local/state/archivage/twitter"
-STATE_FILE = STATE_DIR / "state.json"
+def _stateFile() -> Path:
+    """Get state file path (inside archive dir for syncing)."""
+    return getTwitterStateDir() / "state.json"
 
 
 def loadState() -> dict:
     """Load state from file."""
-    if not STATE_FILE.exists():
+    state_file = _stateFile()
+    if not state_file.exists():
         return {"accounts": {}}
-    with open(STATE_FILE) as f:
+    with open(state_file) as f:
         return json.load(f)
 
 
 def saveState(state: dict):
     """Save state to file."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, "w") as f:
+    state_file = _stateFile()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(state_file, "w") as f:
         json.dump(state, f, indent=2)
 
 

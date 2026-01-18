@@ -61,12 +61,25 @@ def getTwitterCookies() -> Path:
 
 
 def getTwitterAccounts() -> Path:
-    """Get Twitter accounts file path."""
+    """Get Twitter accounts file path (relative to archive_dir if not absolute)."""
     config = loadConfig()
-    return Path(config["twitter"]["accounts"]).expanduser()
+    path = Path(config["twitter"]["accounts"]).expanduser()
+    if not path.is_absolute():
+        path = getArchiveDir() / path
+    return path
 
 
 def getTwitterIncludeRetweets() -> bool:
     """Get whether to include retweets (default: False)."""
     config = loadConfig()
     return config["twitter"].get("include_retweets", False)
+
+
+def getTwitterStateDir() -> Path:
+    """Get Twitter state directory (default: twitter/.state, relative to archive_dir)."""
+    config = loadConfig()
+    state_dir = config["twitter"].get("state_dir", "twitter/.state")
+    path = Path(state_dir).expanduser()
+    if not path.is_absolute():
+        path = getArchiveDir() / path
+    return path
