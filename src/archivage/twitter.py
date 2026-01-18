@@ -208,8 +208,8 @@ class TwitterClient:
                 reset_time = int(response.headers.get("x-rate-limit-reset", 0))
                 sleep_time = max(reset_time - time.time(), 60)
                 resume_at = datetime.fromtimestamp(reset_time).strftime("%H:%M:%S")
-                logger.info(f"Rate limit low ({remaining}), sleeping {sleep_time:.0f}s")
-                print(f"  Rate limit low ({remaining}), sleeping {sleep_time/60:.1f}m (until {resume_at})")
+                logger.info(f"Rate limit low ({remaining}), sleeping {sleep_time:.0f}s (until {resume_at})")
+                print(f"  Rate limit low ({remaining}), sleeping {sleep_time/60:.1f}m (until {resume_at})", flush=True)
                 time.sleep(sleep_time)
                 continue
 
@@ -219,8 +219,8 @@ class TwitterClient:
             if response.status_code == 429:
                 sleep_time = 60 * (2 ** attempt) + random.randint(0, 30)
                 resume_at = datetime.fromtimestamp(time.time() + sleep_time).strftime("%H:%M:%S")
-                logger.warning(f"429 Too Many Requests, sleeping {sleep_time}s")
-                print(f"  Rate limited (429), sleeping {sleep_time/60:.1f}m (until {resume_at})")
+                logger.warning(f"429 Too Many Requests, sleeping {sleep_time}s (until {resume_at})")
+                print(f"  Rate limited (429), sleeping {sleep_time/60:.1f}m (until {resume_at})", flush=True)
                 time.sleep(sleep_time)
                 continue
 

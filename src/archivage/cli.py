@@ -14,6 +14,11 @@ from .config import getArchiveDir, getTwitterCookies, getTwitterAccounts, getTwi
 from .log import setupLogging, logger
 
 
+def output(msg: str):
+    """Print and flush immediately (for journald)."""
+    print(msg, flush=True)
+
+
 # Track current sync state for graceful interrupt handling
 _sync_context = {
     "account": None,
@@ -27,7 +32,7 @@ def _handleInterrupt(signum, frame):
     """Save state and exit gracefully on Ctrl-C."""
     ctx = _sync_context
     if ctx["active"] and ctx["account"]:
-        print("\n  Interrupted. Saving state...")
+        output("\n  Interrupted. Saving state...")
         logger.info(f"Interrupted: saving state for @{ctx['account']}")
         setAccountState(
             ctx["account"],
@@ -35,7 +40,7 @@ def _handleInterrupt(signum, frame):
             oldest_id=ctx["oldest_id"],
             status="in_progress",
         )
-        print(f"State saved. Run sync again to resume.")
+        output("State saved. Run sync again to resume.")
     sys.exit(130)  # Standard exit code for SIGINT
 
 
@@ -98,6 +103,7 @@ def syncBackwards(client, account: str, output_path: Path, existing_ids: set,
                   include_retweets: bool, resume_oldest_id: str = None,
                   preserve_newest_id: str = None):
     """Full sync: paginate backwards through timeline using Search API."""
+    initial_count = len(existing_ids)
     total_new = 0
     page = 0
     empty_pages = 0
@@ -106,10 +112,10 @@ def syncBackwards(client, account: str, output_path: Path, existing_ids: set,
     cursor = None
 
     if resume_oldest_id:
-        print(f"{account}: resuming from {resume_oldest_id}")
+        output(f"{account}: resuming from {resume_oldest_id}")
         logger.info(f"Resuming backwards sync from oldest_id={resume_oldest_id}")
     else:
-        print(f"{account}: full sync")
+        output(f"{account}: full sync")
         logger.info("Starting full backwards sync")
 
     setAccountState(account, status="in_progress")
@@ -120,137 +126,169 @@ def syncBackwards(client, account: str, output_path: Path, existing_ids: set,
     _sync_context["oldest_id"] = oldest_id
     _sync_context["active"] = True
 
-    while True:
-        page += 1
+    try:
+        while True:
+            page += 1
 
-        # Build query: from:account, optionally with max_id for pagination
-        if oldest_id:
-            query = f"from:{account} max_id:{oldest_id}"
-        else:
-            query = f"from:{account}"
+            # Build query: from:account, optionally with max_id for pagination
+            if oldest_id:
+                query = f"from:{account} max_id:{oldest_id}"
+            else:
+                query = f"from:{account}"
 
-        tweets, next_cursor = client.searchTweets(
-            query, cursor=cursor, count=20, include_retweets=include_retweets
-        )
+            tweets, next_cursor = client.searchTweets(
+                query, cursor=cursor, count=20, include_retweets=include_retweets
+            )
 
-        if tweets:
-            empty_pages = 0
-            new_count = appendTweets(output_path, tweets, existing_ids)
-            total_new += new_count
+            if tweets:
+                empty_pages = 0
+                new_count = appendTweets(output_path, tweets, existing_ids)
+                total_new += new_count
 
-            # Track newest/oldest IDs
-            for tweet in tweets:
-                tid = getTweetId(tweet)
-                if tid:
-                    if newest_id is None or tid > newest_id:
-                        newest_id = tid
-                    if oldest_id is None or tid < oldest_id:
-                        oldest_id = tid
+                # Track newest/oldest IDs
+                for tweet in tweets:
+                    tid = getTweetId(tweet)
+                    if tid:
+                        if newest_id is None or tid > newest_id:
+                            newest_id = tid
+                        if oldest_id is None or tid < oldest_id:
+                            oldest_id = tid
 
-            date_range = formatDateRange(tweets)
-            print(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
-            logger.debug(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+                date_range = formatDateRange(tweets)
+                # Show account name every 50 pages for log readability
+                if page % 50 == 1:
+                    output(f"[{account}] Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+                else:
+                    output(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+                logger.debug(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
 
-            # Save progress (for resume on error or interrupt)
-            _sync_context["newest_id"] = newest_id
-            _sync_context["oldest_id"] = oldest_id
-            setAccountState(account, newest_id=newest_id, oldest_id=oldest_id)
-        else:
-            empty_pages += 1
-            print(f"Page {page}: 0 tweets (empty {empty_pages}/10)")
-            logger.debug(f"Page {page}: 0 tweets (empty {empty_pages}/10)")
+                # Save progress (for resume on error or interrupt)
+                _sync_context["newest_id"] = newest_id
+                _sync_context["oldest_id"] = oldest_id
 
-        cursor = next_cursor
+                # Update count every 50 pages
+                running_count = initial_count + total_new
+                if page % 50 == 0:
+                    setAccountState(account, newest_id=newest_id, oldest_id=oldest_id,
+                                    count=running_count)
+                else:
+                    setAccountState(account, newest_id=newest_id, oldest_id=oldest_id)
+            else:
+                empty_pages += 1
+                output(f"Page {page}: 0 tweets (empty {empty_pages}/10)")
+                logger.debug(f"Page {page}: 0 tweets (empty {empty_pages}/10)")
 
-        # End of results
-        if not next_cursor:
-            print("End of timeline.")
-            logger.info("Sync complete: end of timeline")
-            setAccountState(account, newest_id=newest_id, oldest_id=oldest_id,
-                            status="complete")
-            break
+            cursor = next_cursor
 
-        # Too many empty pages
-        if empty_pages >= 10:
-            print("End of timeline (10 empty pages).")
-            logger.info("Sync complete: 10 empty pages")
-            setAccountState(account, newest_id=newest_id, oldest_id=oldest_id,
-                            status="complete")
-            break
+            # End of results
+            if not next_cursor:
+                output("End of timeline.")
+                logger.info("Sync complete: end of timeline")
+                setAccountState(account, newest_id=newest_id, oldest_id=oldest_id,
+                                status="complete")
+                break
+
+            # Too many empty pages
+            if empty_pages >= 10:
+                output("End of timeline (10 empty pages).")
+                logger.info("Sync complete: 10 empty pages")
+                setAccountState(account, newest_id=newest_id, oldest_id=oldest_id,
+                                status="complete")
+                break
+
+    except Exception:
+        # Save count on error so status shows progress
+        running_count = initial_count + total_new
+        setAccountState(account, count=running_count)
+        raise
 
     _sync_context["active"] = False
     total = countTweets(output_path)
     setAccountState(account, count=total)
-    print(f"New: {total_new}, Total: {total}")
+    output(f"New: {total_new}, Total: {total}")
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
 
 
 def syncForward(client, account: str, output_path: Path, existing_ids: set,
                 include_retweets: bool, since_id: str):
-    """Incremental sync: fetch new tweets since last sync using Search API."""
+    """Incremental sync: fetch new tweets since last sync using Search API.
+
+    Note: newest_id is only updated on successful completion to avoid gaps
+    if interrupted. An interrupted forward sync will re-fetch on next run.
+    """
+    initial_count = len(existing_ids)
     total_new = 0
     page = 0
     empty_pages = 0
     cursor = None
-    newest_id = since_id
+    newest_id = since_id  # Only updated in state on completion
 
-    print(f"{account}: incremental since {since_id}")
+    output(f"{account}: incremental since {since_id}")
     logger.info(f"Incremental sync since_id={since_id}")
 
-    # Set up interrupt context
+    # Set up interrupt context - don't update newest_id on interrupt
     _sync_context["account"] = account
-    _sync_context["newest_id"] = newest_id
+    _sync_context["newest_id"] = since_id  # Keep original to avoid gaps
     _sync_context["oldest_id"] = None
     _sync_context["active"] = True
 
     query = f"from:{account} since_id:{since_id}"
 
-    while True:
-        page += 1
-        tweets, next_cursor = client.searchTweets(
-            query, cursor=cursor, count=20, include_retweets=include_retweets
-        )
+    try:
+        while True:
+            page += 1
+            tweets, next_cursor = client.searchTweets(
+                query, cursor=cursor, count=20, include_retweets=include_retweets
+            )
 
-        if tweets:
-            empty_pages = 0
-            new_count = appendTweets(output_path, tweets, existing_ids)
-            total_new += new_count
+            if tweets:
+                empty_pages = 0
+                new_count = appendTweets(output_path, tweets, existing_ids)
+                total_new += new_count
 
-            # Track newest ID
-            for tweet in tweets:
-                tid = getTweetId(tweet)
-                if tid and tid > newest_id:
-                    newest_id = tid
+                # Track newest ID (but don't save to state until completion)
+                for tweet in tweets:
+                    tid = getTweetId(tweet)
+                    if tid and tid > newest_id:
+                        newest_id = tid
 
-            date_range = formatDateRange(tweets)
-            print(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
-            logger.debug(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+                date_range = formatDateRange(tweets)
+                # Show account name every 50 pages for log readability
+                if page % 50 == 1:
+                    output(f"[{account}] Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+                else:
+                    output(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+                logger.debug(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+            else:
+                empty_pages += 1
+                output(f"Page {page}: 0 tweets (empty {empty_pages}/5)")
+                logger.debug(f"Page {page}: 0 tweets (empty {empty_pages}/5)")
 
-            # Update interrupt context
-            _sync_context["newest_id"] = newest_id
-        else:
-            empty_pages += 1
-            print(f"Page {page}: 0 tweets (empty {empty_pages}/5)")
-            logger.debug(f"Page {page}: 0 tweets (empty {empty_pages}/5)")
+            if not next_cursor:
+                output("Caught up.")
+                logger.info("Incremental sync complete")
+                setAccountState(account, newest_id=newest_id, status="complete")
+                break
 
-        if not next_cursor:
-            print("Caught up.")
-            logger.info("Incremental sync complete")
-            setAccountState(account, newest_id=newest_id, status="complete")
-            break
+            if empty_pages >= 5:
+                output("Caught up (5 empty pages).")
+                logger.info("Incremental sync complete (5 empty pages)")
+                setAccountState(account, newest_id=newest_id, status="complete")
+                break
 
-        if empty_pages >= 5:
-            print("Caught up (5 empty pages).")
-            logger.info("Incremental sync complete (5 empty pages)")
-            setAccountState(account, newest_id=newest_id, status="complete")
-            break
+            cursor = next_cursor
 
-        cursor = next_cursor
+    except Exception:
+        # Save count on error so status shows progress
+        # Don't update newest_id - will re-fetch on next run (dedup handles duplicates)
+        running_count = initial_count + total_new
+        setAccountState(account, count=running_count)
+        raise
 
     _sync_context["active"] = False
     total = countTweets(output_path)
     setAccountState(account, count=total)
-    print(f"New: {total_new}, Total: {total}")
+    output(f"New: {total_new}, Total: {total}")
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
 
 
