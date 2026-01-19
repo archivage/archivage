@@ -29,7 +29,7 @@ _sync_context = {
 
 
 def _handleInterrupt(signum, frame):
-    """Save state and exit gracefully on Ctrl-C."""
+    """Save state and exit gracefully on SIGINT/SIGTERM."""
     ctx = _sync_context
     if ctx["active"] and ctx["account"]:
         output("\n  Interrupted. Saving state...")
@@ -41,10 +41,11 @@ def _handleInterrupt(signum, frame):
             status="in_progress",
         )
         output("State saved. Run sync again to resume.")
-    sys.exit(130)  # Standard exit code for SIGINT
+    sys.exit(130 if signum == signal.SIGINT else 143)
 
 
 signal.signal(signal.SIGINT, _handleInterrupt)
+signal.signal(signal.SIGTERM, _handleInterrupt)
 
 
 def formatDateRange(tweets: list) -> str:
