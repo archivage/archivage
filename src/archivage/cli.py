@@ -380,7 +380,9 @@ def twitter_digest(accounts):
 
 
 @twitter.command("repair")
-def twitter_repair():
+@click.argument("accounts", nargs=-1)
+@click.option("--force", is_flag=True, help="Force repair even if state exists")
+def twitter_repair(accounts, force):
     """Rebuild state from archive files (find oldest/newest IDs)."""
     import gzip
 
@@ -389,7 +391,18 @@ def twitter_repair():
         click.echo(f"No archive directory: {archive_dir}")
         return
 
-    archives = sorted(archive_dir.glob("*.jsonl.gz"))
+    if accounts:
+        # Repair specific accounts
+        archives = []
+        for account in accounts:
+            path = archive_dir / f"{account}.jsonl.gz"
+            if path.exists():
+                archives.append(path)
+            else:
+                click.echo(f"  {account}: no archive found")
+    else:
+        archives = sorted(archive_dir.glob("*.jsonl.gz"))
+
     if not archives:
         click.echo("No archives found")
         return
@@ -423,18 +436,18 @@ def twitter_repair():
             continue
 
         state = getAccountState(account)
-        if state.get("newest_id") and state.get("oldest_id"):
+        if not force and state.get("newest_id") and state.get("oldest_id"):
             # Still update count if missing
             if not state.get("count"):
                 setAccountState(account, count=count)
                 click.echo(f"  {account}: updated count to {count:,}")
             else:
-                click.echo(f"  {account}: already has state, skipping")
+                click.echo(f"  {account}: already has state, skipping (use --force)")
             continue
 
         setAccountState(account, newest_id=newest_id, oldest_id=oldest_id,
-                        status="in_progress", count=count)
-        click.echo(f"  {account}: {count:,} tweets, set in_progress")
+                        status="complete", count=count)
+        click.echo(f"  {account}: {count:,} tweets, newest={newest_id}")
 
 
 @twitter.command("status")
