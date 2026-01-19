@@ -379,12 +379,14 @@ def twitter_digest(accounts):
             click.echo(f"  {account}: no archive or empty")
 
 
-@twitter.command("repair")
+@twitter.command("reindex")
 @click.argument("accounts", nargs=-1)
-@click.option("--force", is_flag=True, help="Force repair even if state exists")
-def twitter_repair(accounts, force):
+@click.option("--force", is_flag=True, help="Force reindex even if state exists")
+@click.option("--sort", is_flag=True, help="Sort tweets by ID (chronological)")
+def twitter_reindex(accounts, force, sort):
     """Rebuild state from archive files (find oldest/newest IDs)."""
     import gzip
+    import json
 
     archive_dir = getArchiveDir() / "twitter/archive"
     if not archive_dir.exists():
@@ -392,7 +394,6 @@ def twitter_repair(accounts, force):
         return
 
     if accounts:
-        # Repair specific accounts
         archives = []
         for account in accounts:
             path = archive_dir / f"{account}.jsonl.gz"
@@ -407,23 +408,23 @@ def twitter_repair(accounts, force):
         click.echo("No archives found")
         return
 
-    click.echo(f"Scanning {len(archives)} archives...")
+    click.echo(f"Scanning {len(archives)} archive(s)...")
 
     for path in archives:
         account = path.stem.replace(".jsonl", "")
+        tweets = []
         oldest_id = None
         newest_id = None
-        count = 0
 
         with gzip.open(path, "rt") as f:
             for line in f:
                 if not line.strip():
                     continue
                 try:
-                    tweet = __import__("json").loads(line)
+                    tweet = json.loads(line)
                     tid = getTweetId(tweet)
                     if tid:
-                        count += 1
+                        tweets.append((tid, line))
                         if oldest_id is None or tid < oldest_id:
                             oldest_id = tid
                         if newest_id is None or tid > newest_id:
@@ -431,23 +432,34 @@ def twitter_repair(accounts, force):
                 except Exception:
                     continue
 
+        count = len(tweets)
         if count == 0:
             click.echo(f"  {account}: empty, skipping")
             continue
 
         state = getAccountState(account)
-        if not force and state.get("newest_id") and state.get("oldest_id"):
-            # Still update count if missing
+        state_ok = state.get("newest_id") and state.get("oldest_id")
+
+        if not force and state_ok and not sort:
             if not state.get("count"):
                 setAccountState(account, count=count)
                 click.echo(f"  {account}: updated count to {count:,}")
             else:
-                click.echo(f"  {account}: already has state, skipping (use --force)")
+                click.echo(f"  {account}: state ok, skipping (use --force)")
             continue
+
+        # Sort and rewrite archive if requested
+        if sort:
+            tweets.sort(key=lambda x: x[0])
+            with gzip.open(path, "wt", encoding="utf-8") as f:
+                for _, line in tweets:
+                    f.write(line if line.endswith("\n") else line + "\n")
+            click.echo(f"  {account}: {count:,} tweets, sorted, newest={newest_id}")
+        else:
+            click.echo(f"  {account}: {count:,} tweets, newest={newest_id}")
 
         setAccountState(account, newest_id=newest_id, oldest_id=oldest_id,
                         status="complete", count=count)
-        click.echo(f"  {account}: {count:,} tweets, newest={newest_id}")
 
 
 @twitter.command("status")
