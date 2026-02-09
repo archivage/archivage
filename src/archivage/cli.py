@@ -10,7 +10,7 @@ import click
 from .twitter import TwitterClient
 from .storage import appendTweets, loadExistingIds, countTweets, getTweetId
 from .state import getAccountState, setAccountState, parseTweetDate
-from .config import getArchiveDir, getTwitterCookies, getTwitterAccounts, getTwitterIncludeRetweets
+from .config import getArchiveDir, getTwitterCookies, getTwitterAccounts, getTwitterIncludeRetweets, getTelegramSession
 from .log import setupLogging, logger
 
 
@@ -586,6 +586,184 @@ def withings_status():
         click.echo(f"  {t:<{max_name}}  {v['value']:>8.2f} {unit:>2}  ({local_dt})")
 
 
+# ────────────
+# Telegram
+
+@cli.group()
+def telegram():
+    """Telegram chat archiving."""
+    pass
+
+
+def _telegramCredentials():
+    from .telegram import loadCredentials
+    creds = loadCredentials()
+    if not creds:
+        click.echo("No Telegram credentials found.")
+        click.echo("Run: archivage telegram setup")
+        sys.exit(1)
+    return creds['api_id'], creds['api_hash']
+
+
+@telegram.command("setup")
+def telegram_setup():
+    """Store Telegram API credentials (api_id + api_hash)."""
+    from .telegram import saveCredentials
+    click.echo("Get credentials at https://my.telegram.org")
+    api_id = click.prompt("API ID", type=int)
+    api_hash = click.prompt("API hash")
+    saveCredentials(api_id, api_hash)
+    click.echo("Credentials saved. Now run: archivage telegram auth")
+
+
+@telegram.command("auth")
+def telegram_auth():
+    """Authenticate with Telegram (phone + code)."""
+    import asyncio
+    from .telegram import createClient, authenticate
+
+    api_id, api_hash = _telegramCredentials()
+    client = createClient(api_id, api_hash)
+
+    async def run():
+        me = await authenticate(client)
+        output(f"Authenticated as {me.first_name} (id={me.id})")
+        session = getTelegramSession()
+        output(f"Session saved to {session}.session")
+        await client.disconnect()
+
+    asyncio.run(run())
+
+
+@telegram.command("import")
+@click.argument("file", type=click.Path(exists=True))
+def telegram_import(file):
+    """Import from Telegram Desktop export (result.json)."""
+    from pathlib import Path
+    from .telegram import parseExport
+    from .telegram_db import initDb, upsertChat, insertMessages, setSyncState
+
+    path = Path(file)
+    output(f"Parsing {path.name}...")
+    chats = parseExport(path)
+    output(f"Found {len(chats)} chats")
+
+    conn = initDb()
+    total_new = 0
+    total_msgs = 0
+
+    for chat in chats:
+        upsertChat(conn, chat['id'], chat['name'], chat['type'])
+        msgs = chat['messages']
+        total_msgs += len(msgs)
+
+        if not msgs:
+            conn.commit()
+            continue
+
+        # Batch insert in chunks
+        BATCH = 5000
+        chat_new = 0
+        for i in range(0, len(msgs), BATCH):
+            batch = msgs[i:i + BATCH]
+            chat_new += insertMessages(conn, chat['id'], batch, 'export')
+            conn.commit()
+
+        # Set sync_state to max message ID
+        max_id = max(m['id'] for m in msgs)
+        setSyncState(conn, chat['id'], max_id)
+        conn.commit()
+
+        total_new += chat_new
+        status = f"{chat_new:,} new" if chat_new < len(msgs) else f"{len(msgs):,}"
+        output(f"  {chat['name']}: {status}")
+
+    conn.close()
+    output(f"Total: {total_new:,} new messages ({total_msgs:,} processed)")
+
+
+@telegram.command("fetch")
+def telegram_fetch():
+    """Incremental sync via Telegram API."""
+    import asyncio
+    from .telegram import createClient, iterMessages, fetchDialogs
+    from .telegram_db import initDb, upsertChat, insertMessages, getMaxId, setSyncState
+
+    api_id, api_hash = _telegramCredentials()
+    client = createClient(api_id, api_hash)
+    conn = initDb()
+
+    async def run():
+        await client.start()
+        total_new = 0
+
+        dialogs = await fetchDialogs(client)
+        output(f"Found {len(dialogs)} dialogs")
+
+        for chat_id, name, chat_type, top_id in dialogs:
+            upsertChat(conn, chat_id, name, chat_type)
+            max_id = getMaxId(conn, chat_id) or 0
+
+            if top_id and top_id <= max_id:
+                continue
+
+            chat_new = 0
+            chat_max = max_id
+
+            try:
+                async for batch in iterMessages(client, chat_id, min_id=max_id):
+                    new = insertMessages(conn, chat_id, batch, 'api')
+                    chat_new += new
+                    batch_max = max(m['id'] for m in batch)
+                    chat_max = max(chat_max, batch_max)
+                    setSyncState(conn, chat_id, chat_max)
+                    conn.commit()
+            except Exception as e:
+                output(f"  {name}: error — {e}")
+                logger.error(f"Telegram fetch {name} ({chat_id}): {e}")
+                if chat_new:
+                    conn.commit()
+                continue
+
+            if chat_new:
+                total_new += chat_new
+                output(f"  {name}: {chat_new} new")
+
+        await client.disconnect()
+        output(f"Total: {total_new} new messages")
+
+    try:
+        asyncio.run(run())
+    finally:
+        conn.close()
+
+
+@telegram.command("status")
+def telegram_status():
+    """Show Telegram archive stats."""
+    from .telegram_db import initDb, stats
+
+    conn = initDb()
+    s = stats(conn)
+    conn.close()
+
+    if s['messages'] == 0:
+        click.echo("No messages yet.")
+        click.echo("Run: archivage telegram import <result.json>")
+        click.echo("  or: archivage telegram fetch")
+        return
+
+    click.echo(f"Chats:    {s['chats']:,}")
+    click.echo(f"Messages: {s['messages']:,}")
+    if s['min_date'] and s['max_date']:
+        click.echo(f"Range:    {s['min_date'][:10]} → {s['max_date'][:10]}")
+    if s['last_sync']:
+        click.echo(f"Synced:   {s['synced']} chats, last {s['last_sync']}")
+
+
+# ────────────
+# Top-level commands
+
 @cli.command("sync")
 @click.option("--full", is_flag=True, help="Full sync from scratch (ignore state)")
 @click.pass_context
@@ -597,6 +775,11 @@ def sync(ctx, full):
     except Exception as e:
         logger.error(f"Withings sync error: {e}")
         click.echo(f"Withings sync error: {e}")
+    try:
+        ctx.invoke(telegram_fetch)
+    except Exception as e:
+        logger.error(f"Telegram sync error: {e}")
+        click.echo(f"Telegram sync error: {e}")
 
 
 @cli.command("completion")

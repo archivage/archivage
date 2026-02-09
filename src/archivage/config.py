@@ -27,6 +27,9 @@ def loadConfig() -> dict:
         "withings": {
             "tokens": str(Path.home() / ".config/archivage/withings/tokens.json"),
         },
+        "telegram": {
+            "session": str(Path.home() / ".config/archivage/telegram/session"),
+        },
     }
 
     if CONFIG_FILE.exists():
@@ -91,3 +94,8 @@ def getTwitterStateDir() -> Path:
 def getWithingsTokens() -> Path:
     config = loadConfig()
     return Path(config["withings"]["tokens"]).expanduser()
+
+
+def getTelegramSession() -> Path:
+    config = loadConfig()
+    return Path(config["telegram"]["session"]).expanduser()
