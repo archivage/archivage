@@ -551,6 +551,7 @@ def withings_fetch():
 @withings.command("status")
 def withings_status():
     """Show latest measures and stats."""
+    from datetime import datetime, timezone
     from .withings_db import initDb, getLatestByType, countMeasures
 
     conn = initDb()
@@ -565,7 +566,6 @@ def withings_status():
     click.echo(f"Total measures: {total}")
     click.echo()
 
-    # Show latest values, weight first
     order = ['weight', 'fat_ratio', 'fat_mass', 'fat_free_mass',
              'muscle_mass', 'bone_mass', 'hydration']
     units = {
@@ -580,7 +580,10 @@ def withings_status():
             continue
         v = latest[t]
         unit = units.get(t, '')
-        click.echo(f"  {t:<{max_name}}  {v['value']:>8.2f} {unit:>2}  ({v['datetime']})")
+        # UTC → local
+        utc_dt = datetime.strptime(v['datetime'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+        local_dt = utc_dt.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+        click.echo(f"  {t:<{max_name}}  {v['value']:>8.2f} {unit:>2}  ({local_dt})")
 
 
 @cli.command("sync")
