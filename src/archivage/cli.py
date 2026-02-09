@@ -325,6 +325,12 @@ def twitter():
     pass
 
 
+@cli.group()
+def withings():
+    """Withings body measures archiving."""
+    pass
+
+
 def completeAccounts(ctx, param, incomplete):
     """Shell completion for account names."""
     accounts = list(dict.fromkeys(loadAccountsList()))
@@ -487,12 +493,107 @@ def twitter_status():
         click.echo(f"{account:<{max_name}}  {tweets:>{max_tweets},}  {status}")
 
 
+def _withingsCredentials():
+    """Load Withings client_id and client_secret from credentials file."""
+    from .withings import loadCredentials
+    creds = loadCredentials()
+    if not creds:
+        click.echo("No Withings credentials found.")
+        click.echo("Run: archivage withings setup")
+        sys.exit(1)
+    return creds['client_id'], creds['client_secret']
+
+
+@withings.command("setup")
+def withings_setup():
+    """Store Withings API credentials (client_id + client_secret)."""
+    from .withings import saveCredentials
+    client_id = click.prompt("Client ID")
+    client_secret = click.prompt("Client secret", hide_input=True)
+    saveCredentials(client_id, client_secret)
+    click.echo("Credentials saved. Now run: archivage withings auth")
+
+
+@withings.command("auth")
+def withings_auth():
+    """OAuth2 authorization flow (one-time setup)."""
+    from .withings import runAuthFlow
+    client_id, client_secret = _withingsCredentials()
+    runAuthFlow(client_id, client_secret)
+
+
+@withings.command("fetch")
+def withings_fetch():
+    """Sync measures from Withings (incremental)."""
+    from .withings import getMeasures
+    from .withings_db import initDb, insertMeasures, getLastDatetime, countMeasures
+    from datetime import datetime
+
+    client_id, client_secret = _withingsCredentials()
+    conn = initDb()
+
+    last = getLastDatetime(conn)
+    startdate = None
+    if last:
+        dt = datetime.strptime(last, '%Y-%m-%d %H:%M:%S')
+        startdate = int(dt.timestamp()) + 1
+        output(f"Incremental since {last}")
+    else:
+        output("Full fetch")
+
+    measures = getMeasures(client_id, client_secret, startdate=startdate)
+    new = insertMeasures(conn, measures)
+    total = countMeasures(conn)
+    conn.close()
+    output(f"New: {new}, Total: {total}")
+
+
+@withings.command("status")
+def withings_status():
+    """Show latest measures and stats."""
+    from .withings_db import initDb, getLatestByType, countMeasures
+
+    conn = initDb()
+    total = countMeasures(conn)
+    latest = getLatestByType(conn)
+    conn.close()
+
+    if not latest:
+        click.echo("No measures yet. Run: archivage withings fetch")
+        return
+
+    click.echo(f"Total measures: {total}")
+    click.echo()
+
+    # Show latest values, weight first
+    order = ['weight', 'fat_ratio', 'fat_mass', 'fat_free_mass',
+             'muscle_mass', 'bone_mass', 'hydration']
+    units = {
+        'weight': 'kg', 'fat_ratio': '%', 'fat_mass': 'kg',
+        'fat_free_mass': 'kg', 'muscle_mass': 'kg',
+        'bone_mass': 'kg', 'hydration': 'kg',
+    }
+
+    max_name = max(len(t) for t in order if t in latest)
+    for t in order:
+        if t not in latest:
+            continue
+        v = latest[t]
+        unit = units.get(t, '')
+        click.echo(f"  {t:<{max_name}}  {v['value']:>8.2f} {unit:>2}  ({v['datetime']})")
+
+
 @cli.command("sync")
 @click.option("--full", is_flag=True, help="Full sync from scratch (ignore state)")
 @click.pass_context
 def sync(ctx, full):
-    """Sync all platforms (currently: twitter)."""
+    """Sync all platforms."""
     ctx.invoke(twitter_sync, accounts=(), full=full)
+    try:
+        ctx.invoke(withings_fetch)
+    except Exception as e:
+        logger.error(f"Withings sync error: {e}")
+        click.echo(f"Withings sync error: {e}")
 
 
 @cli.command("completion")

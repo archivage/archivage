@@ -24,6 +24,9 @@ def loadConfig() -> dict:
             "accounts": str(Path.home() / ".config/archivage/twitter/accounts.txt"),
             "include_retweets": False,
         },
+        "withings": {
+            "tokens": str(Path.home() / ".config/archivage/withings/tokens.json"),
+        },
     }
 
     if CONFIG_FILE.exists():
@@ -83,3 +86,8 @@ def getTwitterStateDir() -> Path:
     if not path.is_absolute():
         path = getArchiveDir() / path
     return path
+
+
+def getWithingsTokens() -> Path:
+    config = loadConfig()
+    return Path(config["withings"]["tokens"]).expanduser()
