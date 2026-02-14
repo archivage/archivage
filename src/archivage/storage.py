@@ -69,6 +69,18 @@ def appendTweets(path: Path, tweets: list[dict], existing_ids: set[str] = None) 
     return len(new_tweets)
 
 
+def newerTweetId(a, b):
+    if a is None: return b
+    if b is None: return a
+    return a if int(a) > int(b) else b
+
+
+def olderTweetId(a, b):
+    if a is None: return b
+    if b is None: return a
+    return a if int(a) < int(b) else b
+
+
 def countTweets(path: Path) -> int:
     """Count tweets in JSONL.gz file."""
     if not path.exists():

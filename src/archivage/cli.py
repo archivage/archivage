@@ -8,7 +8,7 @@ import signal
 from pathlib import Path
 import click
 from .twitter import TwitterClient
-from .storage import appendTweets, loadExistingIds, countTweets, getTweetId
+from .storage import appendTweets, loadExistingIds, countTweets, getTweetId, newerTweetId, olderTweetId
 from .state import getAccountState, setAccountState, parseTweetDate
 from .config import getArchiveDir, getTwitterCookies, getTwitterAccounts, getTwitterIncludeRetweets, getTelegramSession
 from .log import setupLogging, logger
@@ -150,10 +150,8 @@ def syncBackwards(client, account: str, output_path: Path, existing_ids: set,
                 for tweet in tweets:
                     tid = getTweetId(tweet)
                     if tid:
-                        if newest_id is None or tid > newest_id:
-                            newest_id = tid
-                        if oldest_id is None or tid < oldest_id:
-                            oldest_id = tid
+                        newest_id = newerTweetId(newest_id, tid)
+                        oldest_id = olderTweetId(oldest_id, tid)
 
                 date_range = formatDateRange(tweets)
                 # Show account name every 50 pages for log readability
@@ -221,6 +219,7 @@ def syncForward(client, account: str, output_path: Path, existing_ids: set,
     total_new = 0
     page = 0
     empty_pages = 0
+    dupe_pages = 0
     cursor = None
     newest_id = since_id  # Only updated in state on completion
 
@@ -250,8 +249,8 @@ def syncForward(client, account: str, output_path: Path, existing_ids: set,
                 # Track newest ID (but don't save to state until completion)
                 for tweet in tweets:
                     tid = getTweetId(tweet)
-                    if tid and tid > newest_id:
-                        newest_id = tid
+                    if tid:
+                        newest_id = newerTweetId(newest_id, tid)
 
                 date_range = formatDateRange(tweets)
                 # Show account name every 50 pages for log readability
@@ -260,6 +259,17 @@ def syncForward(client, account: str, output_path: Path, existing_ids: set,
                 else:
                     output(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
                 logger.debug(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+
+                # Bail out if entire page was duplicates
+                if new_count == 0:
+                    dupe_pages += 1
+                    if dupe_pages >= 3:
+                        output("Caught up (3 all-duplicate pages).")
+                        logger.info("Incremental sync complete (duplicate bail-out)")
+                        setAccountState(account, newest_id=newest_id, status="complete")
+                        break
+                else:
+                    dupe_pages = 0
             else:
                 empty_pages += 1
                 output(f"Page {page}: 0 tweets (empty {empty_pages}/5)")
@@ -431,10 +441,8 @@ def twitter_reindex(accounts, force, sort):
                     tid = getTweetId(tweet)
                     if tid:
                         tweets.append((tid, line))
-                        if oldest_id is None or tid < oldest_id:
-                            oldest_id = tid
-                        if newest_id is None or tid > newest_id:
-                            newest_id = tid
+                        oldest_id = olderTweetId(oldest_id, tid)
+                        newest_id = newerTweetId(newest_id, tid)
                 except Exception:
                     continue
 
@@ -456,7 +464,7 @@ def twitter_reindex(accounts, force, sort):
 
         # Sort and rewrite archive if requested
         if sort:
-            tweets.sort(key=lambda x: x[0])
+            tweets.sort(key=lambda x: int(x[0]))
             with gzip.open(path, "wt", encoding="utf-8") as f:
                 for _, line in tweets:
                     f.write(line if line.endswith("\n") else line + "\n")
