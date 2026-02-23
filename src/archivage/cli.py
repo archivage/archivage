@@ -532,28 +532,87 @@ def withings_auth():
 
 @withings.command("fetch")
 def withings_fetch():
-    """Sync measures from Withings (incremental)."""
-    from .withings import getMeasures
-    from .withings_db import initDb, insertMeasures, getLastDatetime, countMeasures
-    from datetime import datetime
+    """Sync measures, intraday activity, workouts, and sleep from Withings."""
+    from .withings import (getMeasures, getIntradayActivity, getWorkouts,
+                           getSleepSummary)
+    from .withings_db import (initDb, insertMeasures, getLastDatetime,
+                              countMeasures, insertIntraday, getLastIntraday,
+                              insertWorkouts, getLastWorkoutUpdate,
+                              insertSleep, getLastSleep)
+    from datetime import datetime, timedelta
+    import time as _time
 
     client_id, client_secret = _withingsCredentials()
     conn = initDb()
 
+    # ── Body measures ──
     last = getLastDatetime(conn)
     startdate = None
     if last:
         dt = datetime.strptime(last, '%Y-%m-%d %H:%M:%S')
         startdate = int(dt.timestamp()) + 1
-        output(f"Incremental since {last}")
+        output(f"Measures: incremental since {last}")
     else:
-        output("Full fetch")
+        output("Measures: full fetch")
 
     measures = getMeasures(client_id, client_secret, startdate=startdate)
-    new = insertMeasures(conn, measures)
-    total = countMeasures(conn)
+    new_m = insertMeasures(conn, measures)
+    total_m = countMeasures(conn)
+    output(f"  {new_m} new ({total_m} total)")
+
+    # ── Intraday activity (max 24h per request) ──
+    last_intra = getLastIntraday(conn)
+    if last_intra:
+        start_ts = int(datetime.strptime(last_intra, '%Y-%m-%d %H:%M:%S')
+                        .timestamp()) + 1
+    else:
+        start_ts = int((datetime.now() - timedelta(days=7)).timestamp())
+
+    now_ts = int(_time.time())
+    new_intra = 0
+    chunk_start = start_ts
+    while chunk_start < now_ts:
+        chunk_end = min(chunk_start + 86400, now_ts)
+        try:
+            rows = getIntradayActivity(
+                client_id, client_secret, chunk_start, chunk_end)
+            new_intra += insertIntraday(conn, rows)
+        except Exception as e:
+            output(f"  Intraday {chunk_start}: {e}")
+        chunk_start = chunk_end
+
+    output(f"Intraday: {new_intra} new points")
+
+    # ── Workouts ──
+    last_w = getLastWorkoutUpdate(conn)
+    w_start = None
+    if last_w:
+        w_start = last_w[:10]
+    try:
+        workouts = getWorkouts(client_id, client_secret, startdate=w_start)
+        new_w = insertWorkouts(conn, workouts)
+        output(f"Workouts: {new_w} new")
+    except Exception as e:
+        output(f"Workouts: {e}")
+
+    # ── Sleep ──
+    last_sleep = getLastSleep(conn)
+    s_start = None
+    if last_sleep:
+        s_start = last_sleep[:10]
+        output(f"Sleep: incremental since {last_sleep}")
+    else:
+        output("Sleep: full fetch")
+
+    try:
+        nights = getSleepSummary(
+            client_id, client_secret, startdate=s_start)
+        new_s = insertSleep(conn, nights)
+        output(f"  {new_s} new nights")
+    except Exception as e:
+        output(f"Sleep: {e}")
+
     conn.close()
-    output(f"New: {new}, Total: {total}")
 
 
 @withings.command("status")
@@ -575,11 +634,14 @@ def withings_status():
     click.echo()
 
     order = ['weight', 'fat_ratio', 'fat_mass', 'fat_free_mass',
-             'muscle_mass', 'bone_mass', 'hydration']
+             'muscle_mass', 'bone_mass', 'hydration',
+             'systolic_bp', 'diastolic_bp', 'heart_pulse']
     units = {
         'weight': 'kg', 'fat_ratio': '%', 'fat_mass': 'kg',
         'fat_free_mass': 'kg', 'muscle_mass': 'kg',
         'bone_mass': 'kg', 'hydration': 'kg',
+        'systolic_bp': 'mmHg', 'diastolic_bp': 'mmHg',
+        'heart_pulse': 'bpm',
     }
 
     max_name = max(len(t) for t in order if t in latest)

@@ -15,21 +15,26 @@ from .config import getWithingsTokens
 from .log import logger
 
 
-AUTH_URL    = 'https://account.withings.com/oauth2_user/authorize2'
-TOKEN_URL   = 'https://wbsapi.withings.net/v2/oauth2'
-MEASURE_URL = 'https://wbsapi.withings.net/measure'
+AUTH_URL      = 'https://account.withings.com/oauth2_user/authorize2'
+TOKEN_URL     = 'https://wbsapi.withings.net/v2/oauth2'
+MEASURE_URL   = 'https://wbsapi.withings.net/measure'
+MEASURE_V2URL = 'https://wbsapi.withings.net/v2/measure'
+SLEEP_V2URL   = 'https://wbsapi.withings.net/v2/sleep'
 
-SCOPE = 'user.metrics'
+SCOPE = 'user.metrics,user.activity,user.sleepevents'
 
 # Withings meastype → human-readable name
 MEASURE_TYPES = {
     1:  'weight',
+    5:  'fat_free_mass',
     6:  'fat_ratio',
     8:  'fat_mass',
-    5:  'fat_free_mass',
+    9:  'diastolic_bp',
+    10: 'systolic_bp',
+    11: 'heart_pulse',
     76: 'muscle_mass',
-    88: 'bone_mass',
     77: 'hydration',
+    88: 'bone_mass',
 }
 
 
@@ -196,6 +201,135 @@ def getMeasures(client_id: str, client_secret: str,
 
     logger.info(f"Fetched {len(measures)} measures from Withings")
     return measures
+
+
+def getIntradayActivity(client_id: str, client_secret: str,
+                        startdate: int, enddate: int) -> list[dict]:
+    """Fetch intraday heart rate, steps, calories.
+
+    Max 24h per request. Returns list of
+    {datetime (unix), heart_rate, steps, calories, distance}.
+    """
+    access_token = _accessToken(client_id, client_secret)
+
+    resp = httpx.post(MEASURE_V2URL, data={
+        'action':      'getintradayactivity',
+        'startdate':   startdate,
+        'enddate':     enddate,
+        'data_fields': 'heart_rate,steps,calories,distance',
+    }, headers={'Authorization': f"Bearer {access_token}"})
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get('status') != 0:
+        raise RuntimeError(f"Getintradayactivity failed: {body}")
+
+    rows = []
+    for ts, data in body['body'].get('series', {}).items():
+        row = {'datetime': int(ts)}
+        if 'heart_rate' in data:
+            row['heart_rate'] = data['heart_rate']
+        if 'steps' in data:
+            row['steps'] = data['steps']
+        if 'calories' in data:
+            row['calories'] = data['calories']
+        if 'distance' in data:
+            row['distance'] = data['distance']
+        rows.append(row)
+
+    logger.info(f"Fetched {len(rows)} intraday points from Withings")
+    return rows
+
+
+def getWorkouts(client_id: str, client_secret: str,
+                startdate: str = None, enddate: str = None,
+                lastupdate: int = None) -> list[dict]:
+    """Fetch workouts. Returns list of workout dicts."""
+    access_token = _accessToken(client_id, client_secret)
+
+    data_fields = (
+        'calories,effduration,intensity,steps,distance,elevation,'
+        'hr_average,hr_min,hr_max,hr_zone_0,hr_zone_1,hr_zone_2,hr_zone_3'
+    )
+    params = {'action': 'getworkouts', 'data_fields': data_fields}
+    if startdate:
+        params['startdateymd'] = startdate
+    if enddate:
+        params['enddateymd'] = enddate
+    if lastupdate:
+        params['lastupdate'] = lastupdate
+
+    all_workouts = []
+    offset = 0
+    while True:
+        params['offset'] = offset
+        resp = httpx.post(MEASURE_V2URL, data=params,
+                          headers={'Authorization': f"Bearer {access_token}"})
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get('status') != 0:
+            raise RuntimeError(f"Getworkouts failed: {body}")
+
+        for w in body['body'].get('series', []):
+            all_workouts.append(w)
+
+        if not body['body'].get('more'):
+            break
+        offset = body['body'].get('offset', offset + 1)
+
+    logger.info(f"Fetched {len(all_workouts)} workouts from Withings")
+    return all_workouts
+
+
+def getSleepSummary(client_id: str, client_secret: str,
+                    startdate: str = None, enddate: str = None) -> list[dict]:
+    """Fetch sleep summaries from Sleep v2 API.
+
+    startdate/enddate: YYYY-MM-DD strings.
+    Returns list of sleep night dicts with durations, HR, scores, etc.
+    """
+    access_token = _accessToken(client_id, client_secret)
+
+    data_fields = (
+        'nb_rem_episodes,sleep_efficiency,sleep_latency,sleep_score,'
+        'total_sleep_time,total_timeinbed,wakeup_latency,'
+        'waso,deepsleepduration,lightsleepduration,remsleepduration,'
+        'wakeupduration,wakeupcount,out_of_bed_count,'
+        'hr_average,hr_min,hr_max,rr_average,rr_min,rr_max,'
+        'breathing_disturbances_intensity,snoring,snoringepisodecount'
+    )
+    from datetime import datetime as _dt, timedelta
+    if not startdate:
+        startdate = (_dt.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+    if not enddate:
+        enddate = _dt.now().strftime('%Y-%m-%d')
+
+    params = {
+        'action':       'getsummary',
+        'startdateymd': startdate,
+        'enddateymd':   enddate,
+        'data_fields':  data_fields,
+    }
+
+    all_nights = []
+    offset = 0
+    while True:
+        params['offset'] = offset
+        resp = httpx.post(SLEEP_V2URL, data=params,
+                          headers={'Authorization': f"Bearer {access_token}"})
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get('status') != 0:
+            raise RuntimeError(f"Sleep getsummary failed: {body}")
+
+        for s in body['body'].get('series', []):
+            all_nights.append(s)
+
+        if not body['body'].get('more'):
+            break
+        offset = body['body'].get('offset', offset + 1)
+
+    logger.info(f"Fetched {len(all_nights)} sleep summaries from Withings")
+    return all_nights
 
 
 # ────────────
