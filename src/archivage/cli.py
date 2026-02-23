@@ -472,8 +472,9 @@ def twitter_reindex(accounts, force, sort):
         else:
             click.echo(f"  {account}: {count:,} tweets, newest={newest_id}")
 
+        prev_status = state.get("status", "complete")
         setAccountState(account, newest_id=newest_id, oldest_id=oldest_id,
-                        status="complete", count=count)
+                        status=prev_status, count=count)
 
 
 @twitter.command("status")
@@ -806,6 +807,33 @@ def telegram_fetch():
         asyncio.run(run())
     finally:
         conn.close()
+
+
+@telegram.command("download-media")
+@click.option("--chat", required=True, type=int, help="Chat ID")
+@click.option("--msg", required=True, type=int, help="Message ID")
+@click.option("-o", "--output", default=".", help="Output directory")
+def telegram_download_media(chat, msg, output):
+    """Download media from a specific message."""
+    import asyncio
+    from pathlib import Path
+    from .telegram import createClient, downloadMedia
+
+    api_id, api_hash = _telegramCredentials()
+    client = createClient(api_id, api_hash)
+    out = Path(output)
+    out.mkdir(parents=True, exist_ok=True)
+
+    async def run():
+        await client.start()
+        path = await downloadMedia(client, chat, msg, out)
+        await client.disconnect()
+        if path:
+            click.echo(path)
+        else:
+            click.echo("No media found or download failed.")
+
+    asyncio.run(run())
 
 
 @telegram.command("status")

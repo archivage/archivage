@@ -156,6 +156,18 @@ async def iterMessages(client, chat_id: int, min_id: int = 0, batch_size: int = 
         yield batch
 
 
+async def downloadMedia(client, chat_id: int, msg_id: int, output: Path):
+    """Download media from a specific message to output path."""
+    msgs = await client.get_messages(chat_id, ids=msg_id)
+    if not msgs or not msgs.media:
+        logger.info(f"Message {msg_id} in {chat_id}: no media, skipping")
+        return None
+    path = await client.download_media(msgs, file=str(output))
+    if path:
+        logger.info(f"Downloaded media to {path}")
+    return path
+
+
 async def fetchDialogs(client):
     """Return list of (id, name, type_str, top_msg_id) for all dialogs.
 
