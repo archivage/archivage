@@ -91,6 +91,21 @@ def getTwitterStateDir() -> Path:
     return path
 
 
+def getTwitterPersonalCookies() -> Path:
+    """Get personal cookies for likes/bookmarks. Falls back to getTwitterCookies()."""
+    config = loadConfig()
+    personal = config["twitter"].get("personal_cookies")
+    if personal:
+        return Path(personal).expanduser()
+    return getTwitterCookies()
+
+
+def getTwitterPersonalAccount() -> str | None:
+    """Get personal account screen name for likes."""
+    config = loadConfig()
+    return config["twitter"].get("personal_account")
+
+
 def getWithingsTokens() -> Path:
     config = loadConfig()
     return Path(config["withings"]["tokens"]).expanduser()

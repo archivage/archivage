@@ -72,6 +72,37 @@ def setAccountState(account: str, newest_id: str = None, oldest_id: str = None,
     saveState(state)
 
 
+def getCollectionState(name: str) -> dict:
+    """Get state for a collection (likes, bookmarks)."""
+    state = loadState()
+    return state.get(name, {})
+
+
+def setCollectionState(name: str, newest_id: str = None, oldest_id: str = None,
+                       status: str = None, count: int = None,
+                       cursor: str = None, user_id: str = None):
+    """Update state for a collection (likes, bookmarks)."""
+    state = loadState()
+    if name not in state:
+        state[name] = {}
+
+    col = state[name]
+
+    if newest_id is not None: col["newest_id"] = newest_id
+    if oldest_id is not None: col["oldest_id"] = oldest_id
+    if status   is not None: col["status"]    = status
+    if count    is not None: col["count"]      = count
+    if user_id  is not None: col["user_id"]    = user_id
+
+    # cursor: save for resume, clear on completion
+    if cursor is not None:
+        col["cursor"] = cursor
+    elif status == "complete" and "cursor" in col:
+        del col["cursor"]
+
+    saveState(state)
+
+
 def parseTweetDate(tweet: dict) -> datetime | None:
     """Parse created_at from tweet."""
     if "legacy" not in tweet:

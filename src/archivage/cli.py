@@ -9,8 +9,10 @@ from pathlib import Path
 import click
 from .twitter import TwitterClient
 from .storage import appendTweets, loadExistingIds, countTweets, getTweetId, newerTweetId, olderTweetId
-from .state import getAccountState, setAccountState, parseTweetDate
-from .config import getArchiveDir, getTwitterCookies, getTwitterAccounts, getTwitterIncludeRetweets, getTelegramSession
+from .state import getAccountState, setAccountState, getCollectionState, setCollectionState, parseTweetDate
+from .config import (getArchiveDir, getTwitterCookies, getTwitterAccounts,
+                     getTwitterIncludeRetweets, getTwitterPersonalCookies,
+                     getTwitterPersonalAccount, getTelegramSession)
 from .log import setupLogging, logger
 
 
@@ -22,8 +24,10 @@ def output(msg: str):
 # Track current sync state for graceful interrupt handling
 _sync_context = {
     "account": None,
+    "collection": None,
     "newest_id": None,
     "oldest_id": None,
+    "cursor": None,
     "active": False,
 }
 
@@ -31,7 +35,18 @@ _sync_context = {
 def _handleInterrupt(signum, frame):
     """Save state and exit gracefully on SIGINT/SIGTERM."""
     ctx = _sync_context
-    if ctx["active"] and ctx["account"]:
+    if ctx["active"] and ctx["collection"]:
+        output("\n  Interrupted. Saving state...")
+        logger.info(f"Interrupted: saving state for {ctx['collection']}")
+        setCollectionState(
+            ctx["collection"],
+            newest_id=ctx["newest_id"],
+            oldest_id=ctx["oldest_id"],
+            cursor=ctx.get("cursor"),
+            status="in_progress",
+        )
+        output("State saved. Run again to resume.")
+    elif ctx["active"] and ctx["account"]:
         output("\n  Interrupted. Saving state...")
         logger.info(f"Interrupted: saving state for @{ctx['account']}")
         setAccountState(
@@ -299,6 +314,144 @@ def syncForward(client, account: str, output_path: Path, existing_ids: set,
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
 
 
+def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn):
+    """Sync a collection (likes or bookmarks) by paginating newest-first.
+
+    fetch_fn(cursor, count) -> (tweets, next_cursor)
+    """
+    initial_count = len(existing_ids)
+    total_new = 0
+    page = 0
+    dupe_pages = 0
+    newest_id = None
+    oldest_id = None
+
+    state = getCollectionState(collection)
+    prev_status = state.get("status")
+    prev_newest = state.get("newest_id")
+    prev_oldest = state.get("oldest_id")
+    resume_cursor = state.get("cursor")
+    is_incremental = prev_status == "complete" and prev_newest
+
+    cursor = None
+    if prev_status == "in_progress" and resume_cursor:
+        cursor = resume_cursor
+        output(f"{collection}: resuming from saved cursor")
+        logger.info(f"Resuming {collection} from cursor")
+    elif is_incremental:
+        output(f"{collection}: incremental")
+        logger.info(f"Incremental {collection} sync")
+    else:
+        output(f"{collection}: full sync")
+        logger.info(f"Full {collection} sync")
+
+    # Preserve existing IDs from state
+    newest_id = prev_newest
+    oldest_id = prev_oldest
+
+    setCollectionState(collection, status="in_progress")
+
+    # Set up interrupt context
+    _sync_context["collection"] = collection
+    _sync_context["account"] = None
+    _sync_context["newest_id"] = newest_id
+    _sync_context["oldest_id"] = oldest_id
+    _sync_context["cursor"] = cursor
+    _sync_context["active"] = True
+
+    try:
+        while True:
+            page += 1
+            tweets, next_cursor = fetch_fn(cursor, 100)
+
+            if tweets:
+                new_count = appendTweets(output_path, tweets, existing_ids)
+                total_new += new_count
+
+                for tweet in tweets:
+                    tid = getTweetId(tweet)
+                    if tid:
+                        newest_id = newerTweetId(newest_id, tid)
+                        oldest_id = olderTweetId(oldest_id, tid)
+
+                date_range = formatDateRange(tweets)
+                if page % 50 == 1:
+                    output(f"[{collection}] Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+                else:
+                    output(f"Page {page}: {len(tweets)} tweets, {new_count} new{date_range}")
+
+                _sync_context["newest_id"] = newest_id
+                _sync_context["oldest_id"] = oldest_id
+                _sync_context["cursor"] = next_cursor
+
+                # Save progress
+                running_count = initial_count + total_new
+                if page % 50 == 0:
+                    setCollectionState(collection, newest_id=newest_id,
+                                       oldest_id=oldest_id, cursor=next_cursor,
+                                       count=running_count)
+                else:
+                    setCollectionState(collection, newest_id=newest_id,
+                                       oldest_id=oldest_id, cursor=next_cursor)
+
+                # Incremental: stop on dupe pages
+                if is_incremental and new_count == 0:
+                    dupe_pages += 1
+                    if dupe_pages >= 3:
+                        output("Caught up (3 all-duplicate pages).")
+                        logger.info(f"{collection} sync complete (dupe bail-out)")
+                        break
+                else:
+                    dupe_pages = 0
+            else:
+                output(f"Page {page}: 0 tweets")
+                if is_incremental:
+                    output("Caught up.")
+                    logger.info(f"{collection} incremental complete (empty)")
+                else:
+                    output("End of collection.")
+                    logger.info(f"{collection} complete (empty page)")
+                break
+
+            if not next_cursor:
+                output("End of collection.")
+                logger.info(f"{collection} complete (no cursor)")
+                break
+
+            cursor = next_cursor
+
+    except Exception:
+        running_count = initial_count + total_new
+        setCollectionState(collection, count=running_count)
+        raise
+
+    _sync_context["active"] = False
+    _sync_context["collection"] = None
+    total = countTweets(output_path)
+    setCollectionState(collection, newest_id=newest_id, oldest_id=oldest_id,
+                       status="complete", count=total)
+    output(f"New: {total_new}, Total: {total}")
+    logger.info(f"{collection} done: new={total_new} total={total}")
+
+
+def _resolvePersonalUserId(client):
+    """Resolve personal user ID from config, caching in state."""
+    account = getTwitterPersonalAccount()
+    if not account:
+        raise click.ClickException(
+            "personal_account not set in config.toml [twitter] section")
+
+    # Check if cached in likes state
+    state = getCollectionState("likes")
+    cached = state.get("user_id")
+    if cached:
+        return cached
+
+    user_id = client.getUserId(account)
+    setCollectionState("likes", user_id=user_id)
+    return user_id
+
+
 def loadAccountsList() -> list[str]:
     """Load accounts from config file."""
     accounts_file = getTwitterAccounts()
@@ -373,8 +526,8 @@ def twitter_sync(accounts, full):
 @twitter.command("digest")
 @click.argument("accounts", nargs=-1)
 def twitter_digest(accounts):
-    """Generate digest files. No args = all archives."""
-    from .digest import generateDigest, listArchives
+    """Generate digest files. No args = all archives + likes/bookmarks."""
+    from .digest import generateDigest, generateCollectionDigest, listArchives
 
     if not accounts:
         accounts = listArchives()
@@ -389,6 +542,12 @@ def twitter_digest(accounts):
             click.echo(f"  {account} → {path}")
         else:
             click.echo(f"  {account}: no archive or empty")
+
+    # Generate collection digests (likes, bookmarks)
+    for collection in ("likes", "bookmarks"):
+        path = generateCollectionDigest(collection)
+        if path:
+            click.echo(f"  {collection} → {path}")
 
 
 @twitter.command("reindex")
@@ -490,12 +649,74 @@ def twitter_status():
         tweets = state.get("count", 0)
         rows.append((account, tweets, status))
 
+    # Add likes/bookmarks to status
+    for name in ("likes", "bookmarks"):
+        state = getCollectionState(name)
+        if state:
+            status = state.get("status", "-")
+            tweets = state.get("count", 0)
+            rows.append((name, tweets, status))
+
     # Column widths
     max_name   = max(len(r[0]) for r in rows)
     max_tweets = max(len(f"{r[1]:,}") for r in rows)
 
     for account, tweets, status in rows:
         click.echo(f"{account:<{max_name}}  {tweets:>{max_tweets},}  {status}")
+
+
+@twitter.command("likes")
+@click.option("--full", is_flag=True, help="Full sync from scratch (ignore state)")
+def twitter_likes(full):
+    """Archive personal likes."""
+    cookies = getTwitterPersonalCookies()
+    if not cookies.exists():
+        click.echo(f"Personal cookies not found: {cookies}")
+        click.echo("Set personal_cookies in [twitter] config.toml")
+        sys.exit(1)
+
+    output_path = getArchiveDir() / "twitter/likes.jsonl.gz"
+    existing_ids = loadExistingIds(output_path)
+
+    if full:
+        setCollectionState("likes", status=None)
+
+    client = TwitterClient(cookies)
+    try:
+        user_id = _resolvePersonalUserId(client)
+
+        def fetch_likes(cursor, count):
+            return client.getLikes(user_id, cursor=cursor, count=count)
+
+        syncCollection(client, "likes", output_path, existing_ids, fetch_likes)
+    finally:
+        client.close()
+
+
+@twitter.command("bookmarks")
+@click.option("--full", is_flag=True, help="Full sync from scratch (ignore state)")
+def twitter_bookmarks(full):
+    """Archive personal bookmarks."""
+    cookies = getTwitterPersonalCookies()
+    if not cookies.exists():
+        click.echo(f"Personal cookies not found: {cookies}")
+        click.echo("Set personal_cookies in [twitter] config.toml")
+        sys.exit(1)
+
+    output_path = getArchiveDir() / "twitter/bookmarks.jsonl.gz"
+    existing_ids = loadExistingIds(output_path)
+
+    if full:
+        setCollectionState("bookmarks", status=None)
+
+    client = TwitterClient(cookies)
+    try:
+        def fetch_bookmarks(cursor, count):
+            return client.getBookmarks(cursor=cursor, count=count)
+
+        syncCollection(client, "bookmarks", output_path, existing_ids, fetch_bookmarks)
+    finally:
+        client.close()
 
 
 def _withingsCredentials():

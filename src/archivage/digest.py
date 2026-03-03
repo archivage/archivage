@@ -161,13 +161,68 @@ def formatDigest(tweets: list[dict], account: str) -> str:
         except:
             date_str = tweet["date"][:16] if tweet["date"] else "unknown"
 
-        header = f"🐦 {date_str} ♥️ {tweet['favorite_count']} 🔖 {tweet['bookmark_count']}"
+        header = f"🐦 {date_str} 💖 {tweet['favorite_count']} 🔖 {tweet['bookmark_count']}"
         lines.append(header)
         lines.append("")
         lines.append(tweet["content"])
         lines.append("")
 
     return "\n".join(lines)
+
+
+def formatCollectionDigest(tweets: list[dict], collection: str) -> str:
+    """Format a multi-author collection (likes/bookmarks) into digest text."""
+    if not tweets:
+        return ""
+
+    tweets_sorted = sorted(tweets, key=lambda t: t["date"], reverse=True)
+
+    lines = ["---"]
+    lines.append(f"type: {collection}")
+    lines.append(f"count: {len(tweets_sorted)}")
+    lines.append("---")
+    lines.append("")
+
+    for tweet in tweets_sorted:
+        try:
+            dt = datetime.fromisoformat(tweet["date"].replace(" ", "T"))
+            date_str = dt.strftime("%Y.%m.%d %H:%M")
+        except:
+            date_str = tweet["date"][:16] if tweet["date"] else "unknown"
+
+        handle = tweet.get("author", {}).get("handle", "?")
+        header = f"🐦 {date_str} @{handle} 💖 {tweet['favorite_count']} 🔖 {tweet['bookmark_count']}"
+        lines.append(header)
+        lines.append("")
+        lines.append(tweet["content"])
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def generateCollectionDigest(collection: str, output_dir: Path = None) -> Path | None:
+    """Generate digest for a collection (likes or bookmarks)."""
+    archive_dir = getArchiveDir() / "twitter"
+    if output_dir is None:
+        output_dir = getArchiveDir() / "twitter/digests"
+
+    jsonl_path = archive_dir / f"{collection}.jsonl.gz"
+    if not jsonl_path.exists():
+        return None
+
+    tweets = loadTweets(jsonl_path)
+    if not tweets:
+        return None
+
+    content = formatCollectionDigest(tweets, collection)
+    if not content:
+        return None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{collection}.txt"
+    output_path.write_text(content, encoding="utf-8")
+
+    return output_path
 
 
 def generateDigest(account: str, archive_dir: Path = None, output_dir: Path = None) -> Path | None:
