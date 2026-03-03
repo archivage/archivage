@@ -218,7 +218,6 @@ def syncForward(client, account: str, output_path: Path, existing_ids: set,
     initial_count = len(existing_ids)
     total_new = 0
     page = 0
-    empty_pages = 0
     dupe_pages = 0
     cursor = None
     newest_id = since_id  # Only updated in state on completion
@@ -242,7 +241,6 @@ def syncForward(client, account: str, output_path: Path, existing_ids: set,
             )
 
             if tweets:
-                empty_pages = 0
                 new_count = appendTweets(output_path, tweets, existing_ids)
                 total_new += new_count
 
@@ -271,19 +269,17 @@ def syncForward(client, account: str, output_path: Path, existing_ids: set,
                 else:
                     dupe_pages = 0
             else:
-                empty_pages += 1
-                output(f"Page {page}: 0 tweets (empty {empty_pages}/5)")
-                logger.debug(f"Page {page}: 0 tweets (empty {empty_pages}/5)")
+                output(f"Page {page}: 0 tweets (empty)")
+                logger.debug(f"Page {page}: 0 tweets (empty)")
+                # since_id bounds the query — one empty page is definitive
+                output("Caught up.")
+                logger.info("Incremental sync complete (empty page)")
+                setAccountState(account, newest_id=newest_id, status="complete")
+                break
 
             if not next_cursor:
                 output("Caught up.")
                 logger.info("Incremental sync complete")
-                setAccountState(account, newest_id=newest_id, status="complete")
-                break
-
-            if empty_pages >= 5:
-                output("Caught up (5 empty pages).")
-                logger.info("Incremental sync complete (5 empty pages)")
                 setAccountState(account, newest_id=newest_id, status="complete")
                 break
 
