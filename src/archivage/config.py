@@ -20,7 +20,7 @@ def loadConfig() -> dict:
     defaults = {
         "archive_dir": str(Path.home() / "Archive"),
         "twitter": {
-            "cookies": str(Path.home() / "Archive/.gallery-dl/x.obteneur.cookies.txt"),
+            "cookies": str(Path.home() / ".config/archivage/twitter/cookies.txt"),
             "accounts": str(Path.home() / ".config/archivage/twitter/accounts.txt"),
             "include_retweets": False,
         },
