@@ -14,6 +14,7 @@ from .config import (getArchiveDir, getTwitterCookies, getTwitterAccounts,
                      getTwitterIncludeRetweets, getTwitterPersonalCookies,
                      getTwitterPersonalAccount, getTelegramSession)
 from .log import setupLogging, logger
+from .web import savePage, saveAll
 
 
 def output(msg: str):
@@ -1095,6 +1096,48 @@ def sync(ctx, full):
     except Exception as e:
         logger.error(f"Telegram sync error: {e}")
         click.echo(f"Telegram sync error: {e}")
+
+
+@cli.group()
+def web():
+    """Web page archiving to markdown."""
+    pass
+
+
+@web.command("save")
+@click.argument("url")
+def web_save(url):
+    """Save a single web page as markdown."""
+    archive_dir = getArchiveDir()
+    try:
+        path = savePage(url, archive_dir)
+        output(f"Saved: {path}")
+    except Exception as e:
+        logger.error(f"Failed to save {url}: {e}")
+        output(f"Error: {e}")
+        sys.exit(1)
+
+
+@web.command("save-all")
+@click.argument("url")
+@click.option("--delay", default=0.5, help="Delay between requests in seconds.")
+def web_save_all(url, delay):
+    """Save all same-domain pages linked from a URL."""
+    archive_dir = getArchiveDir()
+
+    def progress(i, total, filename, status):
+        if status == "skip":
+            return
+        output(f"  [{i}/{total}] {filename} ({status})")
+
+    try:
+        output(f"Fetching links from {url}...")
+        saved = saveAll(url, archive_dir, delay=delay, on_progress=progress)
+        output(f"Done. Saved {len(saved)} pages.")
+    except Exception as e:
+        logger.error(f"Failed: {e}")
+        output(f"Error: {e}")
+        sys.exit(1)
 
 
 @cli.command("completion")
