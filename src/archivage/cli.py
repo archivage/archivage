@@ -876,6 +876,174 @@ def withings_status():
 
 
 # ────────────
+# Polar
+
+@cli.group()
+def polar():
+    """Polar AccessLink exercise archiving."""
+    pass
+
+
+def _polarCredentials():
+    from .polar import loadCredentials
+    creds = loadCredentials()
+    if not creds:
+        click.echo("No Polar credentials found.")
+        click.echo("Run: archivage polar setup")
+        sys.exit(1)
+    return creds['client_id'], creds['client_secret']
+
+
+@polar.command("setup")
+def polar_setup():
+    """Store Polar API client credentials."""
+    from .polar import saveCredentials
+    client_id     = click.prompt("Client ID")
+    client_secret = click.prompt("Client secret", hide_input=True)
+    saveCredentials(client_id, client_secret)
+    output("Credentials saved.")
+    output("Now run: archivage polar auth")
+
+
+@polar.command("auth")
+def polar_auth():
+    """Authorize with Polar Flow (OAuth2 browser flow)."""
+    from .polar import runAuthFlow
+    client_id, client_secret = _polarCredentials()
+    runAuthFlow(client_id, client_secret)
+
+
+@polar.command("fetch")
+def polar_fetch():
+    """Sync exercises and HR samples from Polar."""
+    from .polar import getExercises, getExerciseHrSamples
+    from .polar_db import initDb, insertExercise, insertHrSamples, getExerciseIds
+
+    _polarCredentials()  # verify creds exist
+    conn = initDb()
+    existing = getExerciseIds(conn)
+
+    try:
+        exercises = getExercises()
+    except Exception as e:
+        output(f"Error fetching exercises: {e}")
+        conn.close()
+        return
+
+    new_ex = 0
+    total_samples = 0
+
+    for ex in exercises:
+        ex_id = str(ex['id'])
+
+        if insertExercise(conn, ex):
+            new_ex += 1
+            conn.commit()
+
+            # Fetch HR samples for new exercises
+            try:
+                hr_values = getExerciseHrSamples(ex_id)
+                if hr_values:
+                    n = insertHrSamples(conn, ex_id, hr_values)
+                    total_samples += n
+                    conn.commit()
+            except Exception as e:
+                output(f"  HR samples for {ex_id}: error — {e}")
+
+    conn.close()
+    parts = [f"{new_ex} new exercises"]
+    if total_samples:
+        parts.append(f"{total_samples} HR samples")
+    output(f"Polar: {', '.join(parts)} ({len(exercises)} total)")
+
+
+@polar.command("import")
+@click.argument("file", type=click.Path(exists=True))
+def polar_import(file):
+    """Import exercise from a TCX file exported from Polar Flow."""
+    import json
+    import xml.etree.ElementTree as ET
+    from .polar_db import initDb, insertExercise, insertHrSamples
+
+    ns = {'tc': 'http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2'}
+    tree = ET.parse(file)
+    root = tree.getroot()
+
+    activity = root.find('.//tc:Activity', ns)
+    if activity is None:
+        output("No activity found in TCX file.")
+        return
+
+    sport = activity.get('Sport', '')
+    lap = activity.find('tc:Lap', ns)
+    start_time = lap.get('StartTime', '')
+
+    duration_el = lap.find('tc:TotalTimeSeconds', ns)
+    duration = float(duration_el.text) if duration_el is not None else 0
+
+    dist_el = lap.find('tc:DistanceMeters', ns)
+    distance = float(dist_el.text) if dist_el is not None else 0
+
+    cal_el = lap.find('tc:Calories', ns)
+    calories = float(cal_el.text) if cal_el is not None else 0
+
+    hr_avg_el = lap.find('tc:AverageHeartRateBpm/tc:Value', ns)
+    hr_avg = int(hr_avg_el.text) if hr_avg_el is not None else None
+
+    hr_max_el = lap.find('tc:MaximumHeartRateBpm/tc:Value', ns)
+    hr_max = int(hr_max_el.text) if hr_max_el is not None else None
+
+    # Extract per-second HR from trackpoints
+    hr_values = []
+    for tp in activity.findall('.//tc:Trackpoint', ns):
+        hr_el = tp.find('tc:HeartRateBpm/tc:Value', ns)
+        hr_values.append(int(hr_el.text) if hr_el is not None else 0)
+
+    # Generate exercise ID from date
+    date_part = start_time[:10]
+    ex_id = f"tcx-{date_part}"
+
+    ex = {
+        'id': ex_id,
+        'start-time': start_time,
+        'duration': f'PT{int(duration)}S',
+        'sport': sport,
+        'calories': calories,
+        'distance': distance,
+        'heart-rate': {'average': hr_avg, 'maximum': hr_max},
+        'device': 'Polar H10',
+        'has-route': True,
+    }
+
+    conn = initDb()
+    if insertExercise(conn, ex):
+        conn.commit()
+        n = insertHrSamples(conn, ex_id, hr_values)
+        conn.commit()
+        output(f"Imported: {sport}, {date_part}, {len(hr_values)} HR samples")
+    else:
+        output(f"Exercise {ex_id} already exists, skipping.")
+    conn.close()
+
+
+@polar.command("status")
+def polar_status():
+    """Show Polar archive statistics."""
+    from .polar_db import initDb, stats
+    conn = initDb()
+    s = stats(conn)
+    conn.close()
+
+    if not s['exercises']:
+        output("No exercises yet. Run: archivage polar fetch")
+        return
+
+    output(f"Exercises: {s['exercises']}")
+    output(f"HR samples: {s['hr_samples']:,}")
+    output(f"Date range: {s['min_date']} → {s['max_date']}")
+
+
+# ────────────
 # Telegram
 
 @cli.group()
@@ -955,7 +1123,8 @@ def telegram_import(file):
         chat_new = 0
         for i in range(0, len(msgs), BATCH):
             batch = msgs[i:i + BATCH]
-            chat_new += insertMessages(conn, chat['id'], batch, 'export')
+            n, _u = insertMessages(conn, chat['id'], batch, 'export')
+            chat_new += n
             conn.commit()
 
         # Set sync_state to max message ID
@@ -972,10 +1141,12 @@ def telegram_import(file):
 
 
 @telegram.command("fetch")
-def telegram_fetch():
+@click.option("--refresh-days", type=int, default=7,
+              help="Re-fetch last N days to detect edits (0 to disable)")
+def telegram_fetch(refresh_days):
     """Incremental sync via Telegram API."""
     import asyncio
-    from .telegram import createClient, iterMessages, fetchDialogs
+    from .telegram import createClient, iterMessages, iterRecentMessages, fetchDialogs
     from .telegram_db import initDb, upsertChat, insertMessages, getMaxId, setSyncState
 
     api_id, api_hash = _telegramCredentials()
@@ -985,6 +1156,7 @@ def telegram_fetch():
     async def run():
         await client.start()
         total_new = 0
+        total_updated = 0
 
         dialogs = await fetchDialogs(client)
         output(f"Found {len(dialogs)} dialogs")
@@ -1001,7 +1173,7 @@ def telegram_fetch():
 
             try:
                 async for batch in iterMessages(client, chat_id, min_id=max_id):
-                    new = insertMessages(conn, chat_id, batch, 'api')
+                    new, _upd = insertMessages(conn, chat_id, batch, 'api')
                     chat_new += new
                     batch_max = max(m['id'] for m in batch)
                     chat_max = max(chat_max, batch_max)
@@ -1018,8 +1190,28 @@ def telegram_fetch():
                 total_new += chat_new
                 output(f"  {name}: {chat_new} new")
 
+        # Refresh pass: re-fetch recent messages to detect edits
+        if refresh_days:
+            output(f"Refreshing last {refresh_days} days for edits...")
+            for chat_id, name, chat_type, _top_id in dialogs:
+                chat_upd = 0
+                try:
+                    async for batch in iterRecentMessages(client, chat_id, days=refresh_days):
+                        _new, upd = insertMessages(conn, chat_id, batch, 'api')
+                        chat_upd += upd
+                        conn.commit()
+                except Exception as e:
+                    logger.error(f"Telegram refresh {name} ({chat_id}): {e}")
+                    continue
+                if chat_upd:
+                    total_updated += chat_upd
+                    output(f"  {name}: {chat_upd} edited")
+
         await client.disconnect()
-        output(f"Total: {total_new} new messages")
+        parts = [f"{total_new} new"]
+        if total_updated:
+            parts.append(f"{total_updated} updated")
+        output(f"Total: {', '.join(parts)}")
 
     try:
         asyncio.run(run())

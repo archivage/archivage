@@ -27,6 +27,9 @@ def loadConfig() -> dict:
         "withings": {
             "tokens": str(Path.home() / ".config/archivage/withings/tokens.json"),
         },
+        "polar": {
+            "tokens": str(Path.home() / ".config/archivage/polar/tokens.json"),
+        },
         "telegram": {
             "session": str(Path.home() / ".config/archivage/telegram/session"),
         },
@@ -109,6 +112,11 @@ def getTwitterPersonalAccount() -> str | None:
 def getWithingsTokens() -> Path:
     config = loadConfig()
     return Path(config["withings"]["tokens"]).expanduser()
+
+
+def getPolarTokens() -> Path:
+    config = loadConfig()
+    return Path(config["polar"]["tokens"]).expanduser()
 
 
 def getTelegramSession() -> Path:
