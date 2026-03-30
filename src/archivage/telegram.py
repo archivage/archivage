@@ -132,6 +132,9 @@ def _parseApiMessage(msg) -> dict:
             from_name = ' '.join(p for p in parts if p)
         else:
             from_name = getattr(msg.sender, 'title', None)
+    edit_date = None
+    if msg.edit_date:
+        edit_date = msg.edit_date.strftime('%Y-%m-%dT%H:%M:%S')
     return {
         'id':        msg.id,
         'date':      msg.date.strftime('%Y-%m-%dT%H:%M:%S') if msg.date else '',
@@ -141,6 +144,7 @@ def _parseApiMessage(msg) -> dict:
         'reply_to':  msg.reply_to_msg_id if msg.reply_to else None,
         'type':      'message' if not msg.action else 'service',
         'raw':       json.dumps(msg.to_dict(), ensure_ascii=False, default=str),
+        'edit_date': edit_date,
     }
 
 
@@ -148,6 +152,22 @@ async def iterMessages(client, chat_id: int, min_id: int = 0, batch_size: int = 
     """Yield batches of parsed messages from a chat newer than min_id."""
     batch = []
     async for msg in client.iter_messages(chat_id, min_id=min_id):
+        batch.append(_parseApiMessage(msg))
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+async def iterRecentMessages(client, chat_id: int, days: int = 7, batch_size: int = 500):
+    """Yield batches of messages from the last N days (for edit detection)."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    batch = []
+    async for msg in client.iter_messages(chat_id):
+        if msg.date and msg.date < cutoff:
+            break
         batch.append(_parseApiMessage(msg))
         if len(batch) >= batch_size:
             yield batch

@@ -43,6 +43,11 @@ def initDb() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_messages_date
         ON messages(date)
     ''')
+    # Migration: add edit_date column
+    try:
+        conn.execute('ALTER TABLE messages ADD COLUMN edit_date TEXT')
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute('''
         CREATE TABLE IF NOT EXISTS sync_state (
             chat_id  INTEGER PRIMARY KEY,
@@ -63,25 +68,42 @@ def upsertChat(conn: sqlite3.Connection, chat_id: int, name: str, chat_type: str
 
 
 def insertMessages(conn: sqlite3.Connection, chat_id: int,
-                   messages: list[dict], source: str) -> int:
-    """Insert messages for a chat, skipping duplicates. Returns new count."""
-    new = 0
+                   messages: list[dict], source: str) -> tuple[int, int]:
+    """Insert or update messages. Returns (new_count, updated_count).
+
+    New messages are inserted. Existing messages are updated only if the
+    incoming version has a newer edit_date (i.e. the message was edited
+    on Telegram since we last stored it).
+    """
+    new = updated = 0
     for m in messages:
+        edit_date = m.get('edit_date')
         try:
             conn.execute(
                 'INSERT INTO messages'
-                ' (id, chat_id, date, from_id, from_name, text, reply_to, type, raw, source)'
-                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                ' (id, chat_id, date, from_id, from_name, text, reply_to,'
+                '  type, raw, source, edit_date)'
+                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (
                     m['id'], chat_id, m['date'], m.get('from_id'),
                     m.get('from_name'), m.get('text'), m.get('reply_to'),
-                    m['type'], m.get('raw'), source,
+                    m['type'], m.get('raw'), source, edit_date,
                 ),
             )
             new += 1
         except sqlite3.IntegrityError:
-            pass
-    return new
+            if edit_date:
+                r = conn.execute(
+                    'UPDATE messages'
+                    ' SET text=?, raw=?, edit_date=?, from_name=?'
+                    ' WHERE chat_id=? AND id=?'
+                    '   AND (edit_date IS NULL OR edit_date < ?)',
+                    (m.get('text'), m.get('raw'), edit_date,
+                     m.get('from_name'), chat_id, m['id'], edit_date),
+                )
+                if r.rowcount:
+                    updated += 1
+    return new, updated
 
 
 def getMaxId(conn: sqlite3.Connection, chat_id: int) -> int | None:
