@@ -25,7 +25,7 @@ ENDPOINTS = {
     "user_by_screen_name": "/graphql/ck5KkZ8t5cOmoLssopN99Q/UserByScreenName",
     "likes": "/graphql/TGEKkJG_meudeaFcqaxM-Q/Likes",
     "bookmarks": "/graphql/pLtjrO4ubNh996M_Cubwsg/Bookmarks",
-    "search": "/graphql/4fpceYZ6-YQCx_JSl_Cn_A/SearchTimeline",
+    "search": "/graphql/AIdc203rPpK_k_2KWSdm7g/SearchTimeline",
 }
 
 # Features for UserByScreenName
