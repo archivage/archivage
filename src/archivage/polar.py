@@ -158,12 +158,13 @@ def getExerciseHrSamples(exercise_id: str) -> list[int]:
     """Get per-second HR samples for an exercise.
 
     Returns flat list of HR values, one per second from exercise start.
+    Uses GET /v3/exercises/{id}?samples=true (sample_type 0 = HR).
     """
     access_token = _accessToken()
-    resp = httpx.get(f"{API_BASE}/v3/exercises/{exercise_id}/samples/0", headers={
+    resp = httpx.get(f"{API_BASE}/v3/exercises/{exercise_id}", headers={
         'Authorization': f"Bearer {access_token}",
         'Accept':        'application/json',
-    })
+    }, params={'samples': 'true'})
     if resp.status_code == 404:
         logger.info(f"No HR samples for exercise {exercise_id}")
         return []
@@ -172,7 +173,7 @@ def getExerciseHrSamples(exercise_id: str) -> list[int]:
 
     hr_values = []
     for sample in body.get('samples', []):
-        if sample.get('sample-type') != '0':
+        if sample.get('sample_type') != 0 and sample.get('sample-type') != '0':
             continue
         data_str = sample.get('data', '')
         if data_str:

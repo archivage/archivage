@@ -4,6 +4,7 @@ SQLite storage for Polar exercises and HR samples.
 
 import json
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .config import getArchiveDir
@@ -57,6 +58,13 @@ def insertExercise(conn: sqlite3.Connection, ex: dict) -> bool:
     """Insert an exercise. Returns True if new, False if duplicate."""
     ex_id = str(ex['id'])
     hr = ex.get('heart-rate') or ex.get('heart_rate') or {}
+    start_str = ex.get('start-time', ex.get('start_time', ''))
+    utc_offset = ex.get('start_time_utc_offset') or ex.get('start-time-utc-offset')
+    if utc_offset is not None and start_str and 'Z' not in start_str:
+        # Convert local time to UTC using offset (minutes)
+        local = datetime.fromisoformat(start_str)
+        utc = local - timedelta(minutes=int(utc_offset))
+        start_str = utc.strftime('%Y-%m-%dT%H:%M:%S')
     try:
         conn.execute(
             'INSERT INTO exercises'
@@ -65,7 +73,7 @@ def insertExercise(conn: sqlite3.Connection, ex: dict) -> bool:
             ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 ex_id,
-                ex.get('start-time', ex.get('start_time', '')),
+                start_str,
                 _parseDuration(ex.get('duration', '')),
                 ex.get('sport', ex.get('detailed-sport-info', '')),
                 ex.get('calories'),
@@ -121,22 +129,22 @@ def stats(conn: sqlite3.Connection) -> dict:
 
 
 def _parseDuration(dur_str: str) -> int | None:
-    """Parse ISO 8601 duration (PT45M30S) to seconds."""
+    """Parse ISO 8601 duration (PT45M30S or PT2449.139S) to seconds."""
     if not dur_str or not dur_str.startswith('PT'):
         return None
     s = dur_str[2:]
     total = 0
     num = ''
     for c in s:
-        if c.isdigit():
+        if c.isdigit() or c == '.':
             num += c
         elif c == 'H' and num:
-            total += int(num) * 3600
+            total += int(float(num)) * 3600
             num = ''
         elif c == 'M' and num:
-            total += int(num) * 60
+            total += int(float(num)) * 60
             num = ''
         elif c == 'S' and num:
-            total += int(num)
+            total += int(float(num))
             num = ''
     return total

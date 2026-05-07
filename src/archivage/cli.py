@@ -914,11 +914,16 @@ def polar_fetch():
     for ex in exercises:
         ex_id = str(ex['id'])
 
-        if insertExercise(conn, ex):
+        is_new = insertExercise(conn, ex)
+        if is_new:
             new_ex += 1
             conn.commit()
 
-            # Fetch HR samples for new exercises
+        # Fetch HR samples if we don't have any yet (new or previous 404)
+        existing = conn.execute(
+            'SELECT COUNT(*) FROM hr_samples WHERE exercise_id = ?', (ex_id,)
+        ).fetchone()[0]
+        if existing == 0:
             try:
                 hr_values = getExerciseHrSamples(ex_id)
                 if hr_values:
