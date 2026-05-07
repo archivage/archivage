@@ -93,6 +93,14 @@ archivage telegram fetch             # incremental sync
 archivage telegram import <file>     # import Desktop export
 archivage telegram status            # show stats
 
+# Web pages
+archivage web save <url>             # save one page as markdown
+archivage web save-all <url>         # save all same-domain pages
+
+# YouTube transcripts
+archivage youtube save <url>         # save a video transcript as markdown
+archivage youtube status             # count archived videos by channel
+
 # All platforms
 archivage sync                       # sync everything
 ```
@@ -110,8 +118,12 @@ archivage sync                       # sync everything
 │   └── .state/state.json   # sync progress
 ├── telegram/
 │   └── telegram.sqlite
-└── withings/
-    └── withings.sqlite
+├── withings/
+│   └── withings.sqlite
+├── web/
+│   └── {domain}/...        # extracted pages as markdown
+└── youtube/
+    └── {channel-handle}/   # transcripts as markdown
 ```
 
 Raw tweet objects are stored as-is from Twitter's GraphQL API — one JSON object

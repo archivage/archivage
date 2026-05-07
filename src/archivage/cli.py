@@ -15,6 +15,7 @@ from .config import (getArchiveDir, getTwitterCookies, getTwitterAccounts,
                      getTwitterPersonalAccount, getTelegramSession)
 from .log import setupLogging, logger
 from .web import savePage, saveAll
+from .youtube import saveVideo as ytSaveVideo, archiveStats as ytArchiveStats
 
 
 def output(msg: str):
@@ -1330,6 +1331,45 @@ def web_save_all(url, delay):
         logger.error(f"Failed: {e}")
         output(f"Error: {e}")
         sys.exit(1)
+
+
+@cli.group()
+def youtube():
+    """YouTube transcript archiving to markdown."""
+    pass
+
+
+@youtube.command("save")
+@click.argument("url")
+@click.option("--lang", default=None, help="Subtitle language (auto-detect if omitted).")
+@click.option("--host", default=None, help="Override host speaker name (default: channel name).")
+@click.option("--guest", default=None, help="Override guest speaker name (default: inferred from title).")
+@click.option("--force", is_flag=True, help="Re-archive even if file already exists.")
+def youtube_save(url, lang, host, guest, force):
+    """Save a YouTube video transcript as markdown."""
+    archive_dir = getArchiveDir()
+    try:
+        path, status = ytSaveVideo(url, archive_dir, lang=lang, host=host, guest=guest, force=force)
+        prefix = "Skipped (exists)" if status == "skipped" else "Saved"
+        output(f"{prefix}: {path}")
+    except Exception as e:
+        logger.error(f"Failed to save {url}: {e}")
+        output(f"Error: {e}")
+        sys.exit(1)
+
+
+@youtube.command("status")
+def youtube_status():
+    """Show YouTube archive stats."""
+    archive_dir = getArchiveDir()
+    stats = ytArchiveStats(archive_dir)
+    if stats["total"] == 0:
+        click.echo("No YouTube transcripts archived yet.")
+        click.echo("Run: archivage youtube save <url>")
+        return
+    click.echo(f"Total: {stats['total']} videos")
+    for channel, count in sorted(stats["channels"].items(), key=lambda x: -x[1]):
+        click.echo(f"  {count:>4}  {channel}")
 
 
 @cli.command("completion")
