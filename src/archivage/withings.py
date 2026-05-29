@@ -3,6 +3,7 @@ Withings API client — OAuth2 flow + measure retrieval.
 """
 
 import json
+import os
 import time
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -62,7 +63,10 @@ def saveCredentials(client_id: str, client_secret: str):
 # Token storage (OAuth2 access + refresh tokens)
 
 def _tokensPath() -> Path:
-    return getWithingsTokens()
+    # ARCHIVAGE_WITHINGS_PROFILE isole les tokens d'un profil (ex: enfant).
+    base = getWithingsTokens()
+    profile = os.environ.get('ARCHIVAGE_WITHINGS_PROFILE')
+    return base.with_name(f'tokens-{profile}.json') if profile else base
 
 
 def loadTokens() -> dict | None:

@@ -102,6 +102,8 @@ def elemToText(elem) -> str:
             else:
                 # Footnote ref — just output the text, parent already has brackets
                 parts.append(inner)
+        elif child.tag == "lb":
+            parts.append(" ")
         else:
             parts.append(elemToText(child))
 

@@ -12,10 +12,13 @@ from .storage import appendTweets, loadExistingIds, countTweets, getTweetId, new
 from .state import getAccountState, setAccountState, getCollectionState, setCollectionState, parseTweetDate
 from .config import (getArchiveDir, getTwitterCookies, getTwitterAccounts,
                      getTwitterIncludeRetweets, getTwitterPersonalCookies,
-                     getTwitterPersonalAccount, getTelegramSession)
+                     getTwitterPersonalAccount, getTelegramSession,
+                     getGmailUser, getGmailPassword, getGmailPasswordFile,
+                     getGmailImapHost, getGmailImapPort)
 from .log import setupLogging, logger
 from .web import savePage, saveAll
 from .youtube import saveVideo as ytSaveVideo, archiveStats as ytArchiveStats
+from . import newsletters as nl
 
 
 def output(msg: str):
@@ -720,16 +723,24 @@ def withings_setup():
 
 
 @withings.command("auth")
-def withings_auth():
+@click.option("--profile", default=None,
+              help="Profil isolé (ex: stella) — tokens et base séparés.")
+def withings_auth(profile):
     """OAuth2 authorization flow (one-time setup)."""
+    if profile:
+        os.environ["ARCHIVAGE_WITHINGS_PROFILE"] = profile
     from .withings import runAuthFlow
     client_id, client_secret = _withingsCredentials()
     runAuthFlow(client_id, client_secret)
 
 
 @withings.command("fetch")
-def withings_fetch():
+@click.option("--profile", default=None,
+              help="Profil isolé (ex: stella) — tokens et base séparés.")
+def withings_fetch(profile):
     """Sync measures, intraday activity, workouts, and sleep from Withings."""
+    if profile:
+        os.environ["ARCHIVAGE_WITHINGS_PROFILE"] = profile
     from .withings import (getMeasures, getIntradayActivity, getWorkouts,
                            getSleepSummary)
     from .withings_db import (initDb, insertMeasures, getLastDatetime,
@@ -813,8 +824,12 @@ def withings_fetch():
 
 
 @withings.command("status")
-def withings_status():
+@click.option("--profile", default=None,
+              help="Profil isolé (ex: stella) — tokens et base séparés.")
+def withings_status(profile):
     """Show latest measures and stats."""
+    if profile:
+        os.environ["ARCHIVAGE_WITHINGS_PROFILE"] = profile
     from datetime import datetime, timezone
     from .withings_db import initDb, getLatestByType, countMeasures
 
@@ -1271,6 +1286,14 @@ def sync(ctx, full):
     except Exception as e:
         logger.error(f"Telegram sync error: {e}")
         click.echo(f"Telegram sync error: {e}")
+    try:
+        if getGmailUser() and getGmailPassword():
+            ctx.invoke(newsletters_fetch, senders_arg=(), full=full)
+        else:
+            logger.info("Newsletters skipped: Gmail not configured")
+    except Exception as e:
+        logger.error(f"Newsletters sync error: {e}")
+        click.echo(f"Newsletters sync error: {e}")
 
 
 @cli.group()
@@ -1352,6 +1375,161 @@ def youtube_status():
     click.echo(f"Total: {stats['total']} videos")
     for channel, count in sorted(stats["channels"].items(), key=lambda x: -x[1]):
         click.echo(f"  {count:>4}  {channel}")
+
+
+# ----------------------------------------------------------------------------
+# Newsletters
+# ----------------------------------------------------------------------------
+
+@cli.group()
+def newsletters():
+    """Newsletter / email archiving via Gmail IMAP."""
+    pass
+
+
+def _gmailConnect():
+    """Open an IMAP connection. Raises click.ClickException on missing credentials."""
+    user = getGmailUser()
+    if not user:
+        raise click.ClickException(
+            "Gmail user not configured. Set [gmail].user in config.toml or "
+            "ARCHIVAGE_GMAIL_USER. Run: archivage newsletters setup"
+        )
+    password = getGmailPassword()
+    if not password:
+        raise click.ClickException(
+            f"Gmail password not found at {getGmailPasswordFile()}. "
+            "Run: archivage newsletters setup"
+        )
+    return nl.connect(user, password,
+                      host=getGmailImapHost(), port=getGmailImapPort())
+
+
+@newsletters.command("setup")
+def newsletters_setup():
+    """Configure Gmail credentials (writes app password to disk, chmod 600)."""
+    user = getGmailUser()
+    if not user:
+        user = click.prompt("Gmail address (e.g. you@gmail.com)")
+        click.echo(f"Add [gmail] user = \"{user}\" to {Path.home()}/.config/archivage/config.toml")
+    pw_path = getGmailPasswordFile()
+    pw_path.parent.mkdir(parents=True, exist_ok=True)
+    password = click.prompt(
+        f"Gmail app password for {user} (16 chars, https://myaccount.google.com/apppasswords)",
+        hide_input=True,
+    )
+    pw_path.write_text(password.strip() + "\n", encoding="utf-8")
+    pw_path.chmod(0o600)
+    output(f"Wrote {pw_path} (chmod 600)")
+    output("Test with: archivage newsletters fetch")
+
+
+@newsletters.command("add")
+@click.argument("sender")
+def newsletters_add(sender):
+    """Add a sender email to track (e.g. tibo@tmaker.io)."""
+    archive_dir = getArchiveDir()
+    if nl.addSender(archive_dir, sender):
+        output(f"Added: {sender.lower()}")
+    else:
+        output(f"Already tracked: {sender.lower()}")
+
+
+@newsletters.command("list")
+def newsletters_list():
+    """List configured senders."""
+    archive_dir = getArchiveDir()
+    senders = nl.loadSenders(archive_dir)
+    if not senders:
+        click.echo(f"No senders. Add one with: archivage newsletters add <email>")
+        click.echo(f"Or edit: {nl.sendersFile(archive_dir)}")
+        return
+    for s in senders:
+        st = nl.getSenderState(archive_dir, s)
+        suffix = ""
+        if st.get("count"):
+            suffix = f" — {st['count']} archived, last_uid={st.get('last_uid', 0)}"
+        click.echo(f"  {s}{suffix}")
+
+
+@newsletters.command("status")
+def newsletters_status():
+    """Show newsletter archive stats."""
+    archive_dir = getArchiveDir()
+    stats = nl.archiveStats(archive_dir)
+    if stats["total"] == 0:
+        click.echo("No newsletters archived yet.")
+        click.echo("Run: archivage newsletters add <email> && archivage newsletters fetch")
+        return
+    click.echo(f"Total: {stats['total']} messages")
+    for sender, count in sorted(stats["senders"].items(), key=lambda x: -x[1]):
+        st = nl.getSenderState(archive_dir, sender)
+        last = st.get("last_sync", "")
+        click.echo(f"  {count:>4}  {sender}" + (f"  (last: {last})" if last else ""))
+
+
+@newsletters.command("fetch")
+@click.argument("senders_arg", nargs=-1, metavar="[SENDER...]")
+@click.option("--full", is_flag=True, help="Re-fetch all messages, ignore state")
+def newsletters_fetch(senders_arg, full):
+    """Fetch new messages for tracked senders (or specific ones)."""
+    archive_dir = getArchiveDir()
+    targets = [s.lower() for s in senders_arg] or nl.loadSenders(archive_dir)
+    if not targets:
+        click.echo("No senders configured. Run: archivage newsletters add <email>")
+        return
+
+    imap = _gmailConnect()
+    try:
+        uidvalidity = nl.selectAllMail(imap)
+        logger.info(f"Newsletters sync: {len(targets)} senders, UIDVALIDITY={uidvalidity}")
+
+        grand = {"saved": 0, "skipped": 0, "failed": 0, "total": 0}
+        for sender in targets:
+            output(f"  {sender}…")
+
+            def progress(i, total, name, status):
+                if status == "skipped":
+                    return
+                output(f"    [{i}/{total}] {name} ({status})")
+
+            try:
+                result = nl.syncSender(imap, sender, archive_dir,
+                                       uidvalidity=uidvalidity,
+                                       force=full,
+                                       on_progress=progress)
+            except nl.ImapError as e:
+                logger.error(f"IMAP error for {sender}: {e}")
+                output(f"    error: {e}")
+                continue
+
+            for k in grand:
+                grand[k] += result.get(k, 0)
+            output(f"    saved={result['saved']} skipped={result['skipped']} "
+                   f"failed={result['failed']} (matched {result['total']})")
+
+        output(f"Done. saved={grand['saved']} skipped={grand['skipped']} "
+               f"failed={grand['failed']}")
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+@newsletters.command("import")
+@click.argument("eml_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--force", is_flag=True, help="Overwrite if file already exists")
+def newsletters_import(eml_file, force):
+    """Save a single .eml file to the newsletters archive."""
+    archive_dir = getArchiveDir()
+    try:
+        path, status = nl.importEml(eml_file, archive_dir, force=force)
+    except Exception as e:
+        logger.error(f"Failed to import {eml_file}: {e}")
+        raise click.ClickException(str(e))
+    prefix = "Skipped (exists)" if status == "skipped" else "Saved"
+    output(f"{prefix}: {path}")
 
 
 @cli.command("completion")

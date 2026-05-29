@@ -33,6 +33,12 @@ def loadConfig() -> dict:
         "telegram": {
             "session": str(Path.home() / ".config/archivage/telegram/session"),
         },
+        "gmail": {
+            "user": None,
+            "password_file": str(Path.home() / ".config/archivage/gmail/password"),
+            "imap_host": "imap.gmail.com",
+            "imap_port": 993,
+        },
     }
 
     if CONFIG_FILE.exists():
@@ -122,3 +128,38 @@ def getPolarTokens() -> Path:
 def getTelegramSession() -> Path:
     config = loadConfig()
     return Path(config["telegram"]["session"]).expanduser()
+
+
+def getGmailUser() -> str | None:
+    """Gmail address used for IMAP login. Falls back to ARCHIVAGE_GMAIL_USER env."""
+    import os
+    config = loadConfig()
+    return config["gmail"].get("user") or os.environ.get("ARCHIVAGE_GMAIL_USER")
+
+
+def getGmailPassword() -> str | None:
+    """Read the Gmail app password from password_file, or ARCHIVAGE_GMAIL_PASSWORD env."""
+    import os
+    env = os.environ.get("ARCHIVAGE_GMAIL_PASSWORD")
+    if env:
+        return env.strip()
+    config = loadConfig()
+    path = Path(config["gmail"]["password_file"]).expanduser()
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8").strip()
+
+
+def getGmailPasswordFile() -> Path:
+    config = loadConfig()
+    return Path(config["gmail"]["password_file"]).expanduser()
+
+
+def getGmailImapHost() -> str:
+    config = loadConfig()
+    return config["gmail"].get("imap_host", "imap.gmail.com")
+
+
+def getGmailImapPort() -> int:
+    config = loadConfig()
+    return int(config["gmail"].get("imap_port", 993))

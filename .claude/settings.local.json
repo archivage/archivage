@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python:*)",
+      "Bash(python3:*)",
+      "Bash(sqlite3:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(archivage --help:*)",
+      "Bash(archivage twitter status:*)",
+      "Bash(archivage twitter repair:*)",
+      "Bash(archivage twitter sync:*)",
+      "Bash(xargs -I {} sh -c 'echo {}')",
+      "Bash(ssh:*)",
+      "Bash(git -C /home/kenzo/Code/archivage remote:*)",
+      "Bash(git -C /home/kenzo/Code/archivage status)",
+      "Bash(git -C /home/kenzo/Code/archivage diff)",
+      "Bash(git -C /home/kenzo/Code/archivage log --oneline -5)",
+      "Bash(scp:*)"
+    ]
+  }
+}

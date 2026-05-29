@@ -101,6 +101,13 @@ archivage web save-all <url>         # save all same-domain pages
 archivage youtube save <url>         # save a video transcript as markdown
 archivage youtube status             # count archived videos by channel
 
+# Newsletters / email
+archivage newsletters setup          # configure Gmail app password
+archivage newsletters add <email>    # track a sender (e.g. tibo@tmaker.io)
+archivage newsletters fetch          # incremental sync via Gmail IMAP
+archivage newsletters status         # count archived messages by sender
+archivage newsletters import <eml>   # ingest a single .eml file
+
 # All platforms
 archivage sync                       # sync everything
 ```
@@ -122,8 +129,12 @@ archivage sync                       # sync everything
 │   └── withings.sqlite
 ├── web/
 │   └── {domain}/...        # extracted pages as markdown
-└── youtube/
-    └── {channel-handle}/   # transcripts as markdown
+├── youtube/
+│   └── {channel-handle}/   # transcripts as markdown
+└── newsletters/
+    ├── .config/senders.txt # tracked sender list
+    ├── .state/state.json   # per-sender UID state
+    └── {sender}/...        # archived emails as markdown
 ```
 
 Raw tweet objects are stored as-is from Twitter's GraphQL API — one JSON object

@@ -3,6 +3,7 @@ SQLite storage for Withings body measures.
 """
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +12,10 @@ from .config import getArchiveDir
 
 
 def _dbPath() -> Path:
-    return getArchiveDir() / 'withings' / 'withings.sqlite'
+    # ARCHIVAGE_WITHINGS_PROFILE isole un profil (ex: enfant) dans sa propre base.
+    profile = os.environ.get('ARCHIVAGE_WITHINGS_PROFILE')
+    name = f'withings-{profile}.sqlite' if profile else 'withings.sqlite'
+    return getArchiveDir() / 'withings' / name
 
 
 def initDb() -> sqlite3.Connection:
