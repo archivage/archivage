@@ -737,7 +737,9 @@ def withings_auth(profile):
 @withings.command("fetch")
 @click.option("--profile", default=None,
               help="Profil isolé (ex: stella) — tokens et base séparés.")
-def withings_fetch(profile):
+@click.option("--full", is_flag=True,
+              help="Re-fetch complet des mesures (ignore l'incrémental) — backfill historique.")
+def withings_fetch(profile, full):
     """Sync measures, intraday activity, workouts, and sleep from Withings."""
     if profile:
         os.environ["ARCHIVAGE_WITHINGS_PROFILE"] = profile
@@ -754,7 +756,7 @@ def withings_fetch(profile):
     conn = initDb()
 
     # ── Body measures ──
-    last = getLastDatetime(conn)
+    last = None if full else getLastDatetime(conn)
     startdate = None
     if last:
         dt = datetime.strptime(last, '%Y-%m-%d %H:%M:%S')

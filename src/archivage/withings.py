@@ -167,41 +167,53 @@ def getMeasures(client_id: str, client_secret: str,
     """
     access_token = _accessToken(client_id, client_secret)
 
-    params = {
+    base = {
         'action':   'getmeas',
         'meastype': ','.join(str(t) for t in MEASURE_TYPES),
         'category': 1,  # real measures only (not objectives)
     }
     if startdate:
-        params['startdate'] = startdate
+        base['startdate'] = startdate
     if enddate:
-        params['enddate'] = enddate
+        base['enddate'] = enddate
 
-    resp = httpx.post(MEASURE_URL, data=params, headers={
-        'Authorization': f"Bearer {access_token}",
-    })
-    resp.raise_for_status()
-    body = resp.json()
-    if body.get('status') != 0:
-        raise RuntimeError(f"Getmeas failed: {body}")
-
+    # L'API renvoie max 1000 groupes par page → paginer via offset tant que more=1.
     measures = []
-    for grp in body['body'].get('measuregrps', []):
-        grpid = grp['grpid']
-        dt    = grp['date']
+    offset = 0
+    while True:
+        params = dict(base)
+        if offset:
+            params['offset'] = offset
+        resp = httpx.post(MEASURE_URL, data=params, headers={
+            'Authorization': f"Bearer {access_token}",
+        })
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get('status') != 0:
+            raise RuntimeError(f"Getmeas failed: {body}")
+        page = body['body']
 
-        for m in grp['measures']:
-            mtype = MEASURE_TYPES.get(m['type'])
-            if not mtype:
-                continue
-            # value = m['value'] * 10^m['unit']
-            value = m['value'] * (10 ** m['unit'])
-            measures.append({
-                'datetime': dt,
-                'type':     mtype,
-                'value':    value,
-                'grpid':    grpid,
-            })
+        for grp in page.get('measuregrps', []):
+            grpid = grp['grpid']
+            dt    = grp['date']
+            for m in grp['measures']:
+                mtype = MEASURE_TYPES.get(m['type'])
+                if not mtype:
+                    continue
+                # value = m['value'] * 10^m['unit']
+                value = m['value'] * (10 ** m['unit'])
+                measures.append({
+                    'datetime': dt,
+                    'type':     mtype,
+                    'value':    value,
+                    'grpid':    grpid,
+                })
+
+        if not page.get('more'):
+            break
+        offset = page.get('offset', 0)
+        if not offset:
+            break
 
     logger.info(f"Fetched {len(measures)} measures from Withings")
     return measures
