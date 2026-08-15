@@ -78,7 +78,12 @@ archivage twitter likes              # archive personal likes
 archivage twitter bookmarks          # archive personal bookmarks
 archivage twitter digest [accounts]  # generate readable digests
 archivage twitter status             # show sync progress
-archivage twitter reindex            # rebuild state from archives
+archivage twitter reindex            # rebuild state and identities from archives
+archivage twitter index              # build/update the local full-text index
+archivage twitter search <query>     # search locally, without Twitter quotas
+archivage twitter read <id-or-url>   # read one locally archived tweet
+archivage twitter thread <id-or-url> # read its locally archived conversation
+archivage twitter media <id-or-url>  # list or download archived media
 
 # Withings
 archivage withings setup             # store API credentials
@@ -139,6 +144,12 @@ archivage sync                       # sync everything
 
 Raw tweet objects are stored as-is from Twitter's GraphQL API — one JSON object
 per line, gzip-compressed. This preserves all fields without transformation.
+Account state is keyed by the original archive name but also records the stable
+Twitter user ID, current handle, and previous handles. A handle rename therefore
+continues writing to the same archive. Deleted or suspended accounts are marked
+unavailable while their local data remains intact.
+The rebuildable full-text index lives outside the synced archive at
+`~/.cache/archivage/twitter/search.sqlite` to avoid SQLite/Syncthing conflicts.
 
 ## Further setup
 

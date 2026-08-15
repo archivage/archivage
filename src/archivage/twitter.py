@@ -5,6 +5,8 @@ Twitter GraphQL API client for archiving.
 import json
 import time
 import random
+import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import httpx
 from pathlib import Path
@@ -19,14 +21,24 @@ BEARER_TOKEN = (
     "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 )
 
-# GraphQL endpoints
-ENDPOINTS = {
-    "user_tweets": "/graphql/E8Wq-_jFSaU7hxVcuOPR9g/UserTweets",
-    "user_by_screen_name": "/graphql/ck5KkZ8t5cOmoLssopN99Q/UserByScreenName",
-    "likes": "/graphql/TGEKkJG_meudeaFcqaxM-Q/Likes",
-    "bookmarks": "/graphql/pLtjrO4ubNh996M_Cubwsg/Bookmarks",
-    "search": "/graphql/AIdc203rPpK_k_2KWSdm7g/SearchTimeline",
+# Fallback query IDs. Live IDs are discovered after a stale-endpoint response.
+QUERY_IDS = {
+    'UserTweets': 'E3opETHurmVJflFsUBVuUQ',
+    'UserByScreenName': 'qRednkZG-rn1P6b48NINmQ',
+    'Likes': 'dv5-II7_Bup_PHish7p6fw',
+    'Bookmarks': 'uzboyXSHSJrR-mGJqep0TQ',
+    'SearchTimeline': 'MJpyQGqgklrVl_0X9gNy3A',
 }
+
+
+class TwitterResponseError(RuntimeError):
+    pass
+
+
+class AccountUnavailable(TwitterResponseError):
+    def __init__(self, reason: str = 'unavailable'):
+        self.reason = reason
+        super().__init__(reason)
 
 # Features for UserByScreenName
 FEATURES_USER = {
@@ -93,6 +105,63 @@ class TwitterClient:
         self.client = None
         self.csrf_token = None
         self.transaction = None
+        self.query_ids = QUERY_IDS.copy()
+        self.query_cache = Path.home() / '.cache/archivage/twitter-query-ids.json'
+        self._loadQueryIds()
+
+    def _loadQueryIds(self):
+        try:
+            data = json.loads(self.query_cache.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        if isinstance(data, dict):
+            self.query_ids.update({k: v for k, v in data.items()
+                                   if isinstance(k, str) and isinstance(v, str)})
+
+    def _saveQueryIds(self):
+        self.query_cache.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.query_cache.with_suffix('.tmp')
+        temp.write_text(json.dumps(self.query_ids, indent=2))
+        temp.replace(self.query_cache)
+
+    def _endpoint(self, operation: str) -> str:
+        query_id = self.query_ids.get(operation)
+        if not query_id:
+            raise TwitterResponseError(f'No query ID for {operation}')
+        return f'/graphql/{query_id}/{operation}'
+
+    def _refreshQueryIds(self) -> bool:
+        """Discover current GraphQL query IDs from X's web bundles."""
+        response = self.client.get('https://x.com/')
+        response.raise_for_status()
+        script_urls = list(dict.fromkeys(re.findall(
+            r'(https://abs\.twimg\.com/responsive-web/client-web[^"\']+\.js)',
+            response.text,
+        )))
+        pattern = re.compile(
+            r'queryId:\s*"([A-Za-z0-9_-]+)"[^}]{0,240}'
+            r'operationName:\s*"([^"]+)"'
+        )
+
+        def fetch(url):
+            try:
+                return httpx.get(url, timeout=20, follow_redirects=True).text
+            except httpx.HTTPError:
+                return ''
+
+        found = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for source in pool.map(fetch, script_urls):
+                for match in pattern.finditer(source):
+                    query_id, operation = match.groups()
+                    found.setdefault(operation, query_id)
+
+        if not found:
+            return False
+        self.query_ids.update(found)
+        self._saveQueryIds()
+        logger.info(f'Discovered {len(found)} live Twitter query IDs')
+        return True
 
     def _loadCookies(self) -> dict[str, str]:
         """Load cookies from Netscape format file."""
@@ -179,15 +248,17 @@ class TwitterClient:
         path = url[url.find("/", 8):]  # Extract path from URL
         return self.transaction.generate(method, path)
 
-    def _call(self, endpoint: str, params: dict) -> dict:
+    def _call(self, operation: str, params: dict) -> dict:
         """Make API request with retry logic."""
         if self.client is None:
             self._initClient()
 
-        url = self.root + endpoint
         max_retries = 5
+        refreshed_query_ids = False
 
         for attempt in range(max_retries):
+            endpoint = self._endpoint(operation)
+            url = self.root + endpoint
             txn_id = self._getTransactionId(url)
             headers = {}
             if txn_id:
@@ -215,6 +286,11 @@ class TwitterClient:
 
             if response.status_code == 200:
                 return response.json()
+
+            if response.status_code in (404, 422) and not refreshed_query_ids:
+                refreshed_query_ids = True
+                if self._refreshQueryIds():
+                    continue
 
             if response.status_code == 429:
                 sleep_time = 60 * (2 ** attempt) + random.randint(0, 30)
@@ -249,8 +325,20 @@ class TwitterClient:
             "fieldToggles": json.dumps({"withAuxiliaryUserLabels": True}),
         }
 
-        data = self._call(ENDPOINTS["user_by_screen_name"], params)
-        return data["data"]["user"]["result"]["rest_id"]
+        data = self._call('UserByScreenName', params)
+        try:
+            result = data['data']['user']['result']
+        except (KeyError, TypeError):
+            raise TwitterResponseError('User lookup returned no user')
+        self._ensureAvailable(result)
+        return result['rest_id']
+
+    @staticmethod
+    def _ensureAvailable(result: dict):
+        typename = result.get('__typename', '') if isinstance(result, dict) else ''
+        if typename == 'UserUnavailable':
+            reason = result.get('reason') or result.get('message') or 'unavailable'
+            raise AccountUnavailable(reason)
 
     def _parseTimeline(self, instructions: list, include_retweets: bool = False):
         """Parse timeline instructions into (tweets, next_cursor, stop_on_empty)."""
@@ -324,11 +412,12 @@ class TwitterClient:
             "fieldToggles": json.dumps({"withArticlePlainText": False}),
         }
 
-        data = self._call(ENDPOINTS["user_tweets"], params)
+        data = self._call('UserTweets', params)
 
         # Parse response - handle both timeline and timeline_v2 keys
         try:
             result = data["data"]["user"]["result"]
+            self._ensureAvailable(result)
             if "timeline_v2" in result:
                 instructions = result["timeline_v2"]["timeline"]["instructions"]
             elif "timeline" in result:
@@ -342,7 +431,7 @@ class TwitterClient:
                 logger.warning("Retrying after malformed response")
                 time.sleep(2)
                 return self.getUserTweets(user_id, cursor, count, include_retweets, _retry=False)
-            return [], None
+            raise TwitterResponseError(f'Unexpected UserTweets response: {e}')
 
         tweets, next_cursor, stop_on_empty = self._parseTimeline(
             instructions, include_retweets)
@@ -403,7 +492,7 @@ class TwitterClient:
             "features": json.dumps(FEATURES_PAGINATION),
         }
 
-        data = self._call(ENDPOINTS["search"], params)
+        data = self._call('SearchTimeline', params)
 
         # Check for server errors (e.g., TimeoutError code 29)
         if "errors" in data:
@@ -472,7 +561,7 @@ class TwitterClient:
             "features": json.dumps(FEATURES_PAGINATION),
         }
 
-        data = self._call(ENDPOINTS["likes"], params)
+        data = self._call('Likes', params)
 
         try:
             result = data["data"]["user"]["result"]
@@ -517,7 +606,7 @@ class TwitterClient:
             "features": json.dumps(FEATURES_PAGINATION),
         }
 
-        data = self._call(ENDPOINTS["bookmarks"], params)
+        data = self._call('Bookmarks', params)
 
         try:
             instructions = data["data"]["bookmark_timeline_v2"]["timeline"]["instructions"]

@@ -5,11 +5,20 @@ CLI entry point for archivage.
 import os
 import sys
 import signal
+import json
+from datetime import datetime
 from pathlib import Path
 import click
-from .twitter import TwitterClient
-from .storage import appendTweets, loadExistingIds, countTweets, getTweetId, newerTweetId, olderTweetId
-from .state import getAccountState, setAccountState, getCollectionState, setCollectionState, parseTweetDate
+from .twitter import AccountUnavailable, TwitterClient
+from .storage import (appendTweets, loadExistingIds, countTweets, getTweetId,
+                      newerTweetId, normalizeTweetId, olderTweetId, tweetAuthor,
+                      tweetIdentity)
+from .state import (clearAccountError, getAccountState, getCollectionState,
+                    markAccountError, markAccountUnavailable, parseTweetDate,
+                    setAccountState, setCollectionState)
+from .twitter_index import (downloadMedia, indexTweets, markSource, mediaUrls,
+                            readThread, readTweet, rebuildIndex, searchTweets,
+                            sourceCurrent, stats as twitterIndexStats)
 from .config import (getArchiveDir, getTwitterCookies, getTwitterAccounts,
                      getTwitterIncludeRetweets, getTwitterPersonalCookies,
                      getTwitterPersonalAccount, getTelegramSession,
@@ -85,15 +94,42 @@ def formatDateRange(tweets: list) -> str:
     return f" [{newest} → {oldest}]"
 
 
-def archiveAccount(account: str, cookies_path: Path, archive_dir: Path, full: bool = False):
+def updateAccountIdentity(account: str, tweets: list[dict]):
+    identity = tweetIdentity(tweets)
+    if not identity['user_id'] and not identity['current_handle']:
+        return
+    setAccountState(
+        account,
+        user_id=identity['user_id'],
+        current_handle=identity['current_handle'],
+        aliases=identity['aliases'],
+    )
+
+
+def archiveAccount(account: str, cookies_path: Path, archive_dir: Path,
+                   full: bool = False, retry_unavailable: bool = False):
     """Archive a single Twitter account via UserTweets timeline."""
     output_path = archive_dir / f"{account}.jsonl.gz"
+    state = getAccountState(account)
+
+    if state.get('availability') == 'unavailable' and not (full or retry_unavailable):
+        output(f'{account}: unavailable, archive preserved (explicit sync to retry)')
+        return
 
     logger.info(f"Sync start: @{account}" + (" (full)" if full else ""))
     client = TwitterClient(cookies_path)
 
     try:
-        user_id = client.getUserId(account)
+        user_id = state.get('user_id')
+        if not user_id:
+            handle = state.get('current_handle') or account
+            user_id = client.getUserId(handle)
+            setAccountState(
+                account,
+                user_id=user_id,
+                current_handle=handle,
+                aliases=[account, handle],
+            )
 
         state = getAccountState(account)
         prev_newest_id = state.get("newest_id")
@@ -114,6 +150,13 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path, full: bo
             syncForward(client, account, user_id, output_path, existing_ids,
                         include_retweets, prev_newest_id)
 
+        setAccountState(
+            account,
+            availability='active',
+            checked_at=datetime.now().astimezone().isoformat(),
+        )
+        clearAccountError(account)
+
     finally:
         client.close()
 
@@ -126,6 +169,7 @@ def syncBackwards(client, account: str, user_id: str, output_path: Path,
     No native resume — interrupted runs restart from the top, but dedup
     against existing_ids makes already-archived pages cheap to skip past.
     """
+    index_complete = not output_path.exists() or sourceCurrent(output_path)
     initial_count = len(existing_ids)
     total_new = 0
     page = 0
@@ -155,6 +199,8 @@ def syncBackwards(client, account: str, user_id: str, output_path: Path,
             if tweets:
                 empty_pages = 0
                 new_count = appendTweets(output_path, tweets, existing_ids)
+                indexTweets(tweets, account)
+                updateAccountIdentity(account, tweets)
                 total_new += new_count
 
                 for tweet in tweets:
@@ -208,6 +254,8 @@ def syncBackwards(client, account: str, user_id: str, output_path: Path,
     _sync_context["active"] = False
     total = countTweets(output_path)
     setAccountState(account, count=total)
+    if index_complete and output_path.exists():
+        markSource(output_path)
     output(f"New: {total_new}, Total: {total}")
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
 
@@ -220,6 +268,7 @@ def syncForward(client, account: str, user_id: str, output_path: Path,
     Note: newest_id is only updated on successful completion to avoid gaps
     if interrupted. An interrupted forward sync will re-fetch on next run.
     """
+    index_complete = not output_path.exists() or sourceCurrent(output_path)
     initial_count = len(existing_ids)
     total_new = 0
     page = 0
@@ -244,6 +293,8 @@ def syncForward(client, account: str, user_id: str, output_path: Path,
 
             if tweets:
                 new_count = appendTweets(output_path, tweets, existing_ids)
+                indexTweets(tweets, account)
+                updateAccountIdentity(account, tweets)
                 total_new += new_count
 
                 for tweet in tweets:
@@ -292,6 +343,8 @@ def syncForward(client, account: str, user_id: str, output_path: Path,
     _sync_context["active"] = False
     total = countTweets(output_path)
     setAccountState(account, count=total)
+    if index_complete and output_path.exists():
+        markSource(output_path)
     output(f"New: {total_new}, Total: {total}")
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
 
@@ -301,6 +354,7 @@ def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn)
 
     fetch_fn(cursor, count) -> (tweets, next_cursor)
     """
+    index_complete = not output_path.exists() or sourceCurrent(output_path)
     initial_count = len(existing_ids)
     total_new = 0
     page = 0
@@ -348,6 +402,7 @@ def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn)
 
             if tweets:
                 new_count = appendTweets(output_path, tweets, existing_ids)
+                indexTweets(tweets, collection)
                 total_new += new_count
 
                 for tweet in tweets:
@@ -412,6 +467,8 @@ def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn)
     total = countTweets(output_path)
     setCollectionState(collection, newest_id=newest_id, oldest_id=oldest_id,
                        status="complete", count=total)
+    if index_complete and output_path.exists():
+        markSource(output_path)
     output(f"New: {total_new}, Total: {total}")
     logger.info(f"{collection} done: new={total_new} total={total}")
 
@@ -483,6 +540,7 @@ def completeAccounts(ctx, param, incomplete):
 @click.option("--full", is_flag=True, help="Full sync from scratch (ignore state)")
 def twitter_sync(accounts, full):
     """Sync Twitter accounts. No args = read from accounts.txt."""
+    explicit_accounts = bool(accounts)
     cookies = getTwitterCookies()
     if not cookies.exists():
         click.echo(f"Cookies file not found: {cookies}")
@@ -497,12 +555,30 @@ def twitter_sync(accounts, full):
             sys.exit(1)
         click.echo(f"Syncing {len(accounts)} accounts")
 
+    failures = []
     for account in accounts:
         try:
-            archiveAccount(account, cookies, archive_dir, full=full)
+            archiveAccount(
+                account,
+                cookies,
+                archive_dir,
+                full=full,
+                retry_unavailable=explicit_accounts,
+            )
+        except AccountUnavailable as e:
+            message = f'{e.reason}; archive preserved'
+            markAccountUnavailable(account, message)
+            logger.warning(f'@{account} unavailable: {message}')
+            click.echo(f'Unavailable @{account}: {message}')
         except Exception as e:
+            markAccountError(account, str(e))
             logger.error(f"Error archiving @{account}: {e}")
             click.echo(f"Error archiving @{account}: {e}")
+            failures.append((account, str(e)))
+
+    if failures:
+        names = ', '.join(f'@{account}' for account, _ in failures)
+        raise click.ClickException(f'{len(failures)} account sync(s) failed: {names}')
 
 
 @twitter.command("digest")
@@ -565,9 +641,13 @@ def twitter_reindex(accounts, force, sort):
 
     for path in archives:
         account = path.stem.replace(".jsonl", "")
-        tweets = []
+        tweets = [] if sort else None
+        count = 0
         oldest_id = None
         newest_id = None
+        current_handle = None
+        user_id = None
+        aliases = set()
 
         with gzip.open(path, "rt") as f:
             for line in f:
@@ -577,26 +657,37 @@ def twitter_reindex(accounts, force, sort):
                     tweet = json.loads(line)
                     tid = getTweetId(tweet)
                     if tid:
-                        tweets.append((tid, line))
+                        count += 1
+                        if sort:
+                            tweets.append((tid, line))
+                        author = tweetAuthor(tweet)
+                        if author['handle']:
+                            aliases.add(author['handle'])
+                        if newest_id is None or int(tid) > int(newest_id):
+                            current_handle = author['handle'] or current_handle
+                            user_id = author['user_id'] or user_id
                         oldest_id = olderTweetId(oldest_id, tid)
                         newest_id = newerTweetId(newest_id, tid)
                 except Exception:
                     continue
 
-        count = len(tweets)
         if count == 0:
             click.echo(f"  {account}: empty, skipping")
             continue
 
         state = getAccountState(account)
         state_ok = state.get("newest_id") and state.get("oldest_id")
+        setAccountState(
+            account,
+            count=count,
+            user_id=user_id,
+            current_handle=current_handle,
+            aliases=list(aliases),
+        )
 
         if not force and state_ok and not sort:
-            if not state.get("count"):
-                setAccountState(account, count=count)
-                click.echo(f"  {account}: updated count to {count:,}")
-            else:
-                click.echo(f"  {account}: state ok, skipping (use --force)")
+            rename = f' → @{current_handle}' if current_handle and current_handle.lower() != account.lower() else ''
+            click.echo(f"  {account}{rename}: identity updated, {count:,} tweets")
             continue
 
         # Sort and rewrite archive if requested
@@ -629,7 +720,11 @@ def twitter_status():
         state = getAccountState(account)
         status = state.get("status", "-")
         tweets = state.get("count", 0)
-        rows.append((account, tweets, status))
+        current = state.get('current_handle')
+        label = account
+        if current and current.lower() != account.lower():
+            label += f' → @{current}'
+        rows.append((label, tweets, status))
 
     # Add likes/bookmarks to status
     for name in ("likes", "bookmarks"):
@@ -645,6 +740,101 @@ def twitter_status():
 
     for account, tweets, status in rows:
         click.echo(f"{account:<{max_name}}  {tweets:>{max_tweets},}  {status}")
+
+
+def _printTweet(tweet: dict):
+    author = f"@{tweet['handle']}" if tweet.get('handle') else tweet.get('name') or 'unknown'
+    click.echo(f"{author} · {tweet.get('created_at') or 'date unknown'}")
+    click.echo(tweet.get('text') or '[no text]')
+    click.echo(tweet['url'])
+    if tweet.get('media'):
+        click.echo(f"Media: {len(tweet['media'])}")
+
+
+@twitter.command('index')
+@click.option('--force', is_flag=True, help='Re-read archives even when unchanged')
+def twitter_index(force):
+    """Build or incrementally update the local SQLite FTS index."""
+    total = 0
+    for path, count in rebuildIndex(force=force):
+        total += count
+        if count:
+            click.echo(f'  {path.name}: {count:,} indexed')
+    index_stats = twitterIndexStats()
+    click.echo(
+        f"Indexed {total:,} rows; {index_stats['tweets']:,} unique tweets "
+        f"from {index_stats['sources']} sources"
+    )
+
+
+@twitter.command('search')
+@click.argument('query')
+@click.option('--limit', default=20, show_default=True)
+@click.option('--from', 'handle', help='Restrict to one author handle')
+@click.option('--json', 'as_json', is_flag=True, help='Output JSON')
+def twitter_search(query, limit, handle, as_json):
+    """Search the local archive without hitting Twitter."""
+    results = searchTweets(query, limit=limit, handle=handle)
+    if as_json:
+        click.echo(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+    for i, tweet in enumerate(results, start=1):
+        if i > 1:
+            click.echo()
+        _printTweet(tweet)
+
+
+@twitter.command('read')
+@click.argument('tweet_id')
+@click.option('--json', 'as_json', is_flag=True, help='Output JSON')
+def twitter_read(tweet_id, as_json):
+    """Read one tweet from the local archive by ID or URL."""
+    tweet_id = normalizeTweetId(tweet_id)
+    tweet = readTweet(tweet_id)
+    if not tweet:
+        raise click.ClickException(f'Tweet {tweet_id} is not in the local index')
+    if as_json:
+        click.echo(json.dumps(tweet, ensure_ascii=False, indent=2))
+    else:
+        _printTweet(tweet)
+
+
+@twitter.command('thread')
+@click.argument('tweet_id')
+@click.option('--json', 'as_json', is_flag=True, help='Output JSON')
+def twitter_thread(tweet_id, as_json):
+    """Read locally archived tweets from the same conversation."""
+    tweet_id = normalizeTweetId(tweet_id)
+    tweets = readThread(tweet_id)
+    if not tweets:
+        raise click.ClickException(f'Tweet {tweet_id} is not in the local index')
+    if as_json:
+        click.echo(json.dumps(tweets, ensure_ascii=False, indent=2))
+        return
+    for i, tweet in enumerate(tweets, start=1):
+        if i > 1:
+            click.echo()
+        _printTweet(tweet)
+
+
+@twitter.command('media')
+@click.argument('tweet_id')
+@click.option('--download', type=click.Path(path_type=Path), help='Download into this directory')
+@click.option('--json', 'as_json', is_flag=True, help='Output JSON')
+def twitter_media(tweet_id, download, as_json):
+    """List or download media referenced by a locally archived tweet."""
+    tweet_id = normalizeTweetId(tweet_id)
+    tweet = readTweet(tweet_id)
+    if not tweet:
+        raise click.ClickException(f'Tweet {tweet_id} is not in the local index')
+    result = {'tweet_id': tweet_id, 'media': mediaUrls(tweet)}
+    if download:
+        result['downloaded'] = downloadMedia(tweet, download)
+    if as_json or download:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    for item in result['media']:
+        click.echo(item['url'])
 
 
 @twitter.command("likes")

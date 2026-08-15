@@ -8,6 +8,7 @@ State tracks:
 """
 
 import json
+import os
 from pathlib import Path
 from datetime import datetime
 from .config import getTwitterStateDir
@@ -28,11 +29,15 @@ def loadState() -> dict:
 
 
 def saveState(state: dict):
-    """Save state to file."""
+    """Save state atomically."""
     state_file = _stateFile()
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(state_file, "w") as f:
+    temp_file = state_file.with_suffix('.tmp')
+    with open(temp_file, 'w') as f:
         json.dump(state, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    temp_file.replace(state_file)
 
 
 def getAccountState(account: str) -> dict:
@@ -42,7 +47,10 @@ def getAccountState(account: str) -> dict:
 
 
 def setAccountState(account: str, newest_id: str = None, oldest_id: str = None,
-                    status: str = None, count: int = None):
+                    status: str = None, count: int = None, user_id: str = None,
+                    current_handle: str = None, aliases: list[str] = None,
+                    availability: str = None, last_error: str = None,
+                    checked_at: str = None):
     """Update state for a specific account."""
     state = loadState()
     if "accounts" not in state:
@@ -64,12 +72,76 @@ def setAccountState(account: str, newest_id: str = None, oldest_id: str = None,
     if count is not None:
         acc["count"] = count
 
+    if user_id is not None:
+        acc['user_id'] = str(user_id)
+
+    if current_handle is not None:
+        old_handle = acc.get('current_handle')
+        known_aliases = set(acc.get('aliases', []))
+        known_aliases.add(account)
+        if old_handle:
+            known_aliases.add(old_handle)
+        known_aliases.add(current_handle)
+        acc['current_handle'] = current_handle
+        acc['aliases'] = sorted(known_aliases, key=str.lower)
+
+    if aliases is not None:
+        known_aliases = set(acc.get('aliases', []))
+        known_aliases.update(a for a in aliases if a)
+        known_aliases.add(account)
+        acc['aliases'] = sorted(known_aliases, key=str.lower)
+
+    if availability is not None:
+        acc['availability'] = availability
+
+    if last_error is not None:
+        acc['last_error'] = last_error
+
+    if checked_at is not None:
+        acc['checked_at'] = checked_at
+
     # Clean up legacy fields
     for field in ["archived_until", "cursor", "method"]:
         if field in acc:
             del acc[field]
 
     saveState(state)
+
+
+def clearAccountError(account: str):
+    """Clear transient error fields after a successful check."""
+    state = loadState()
+    acc = state.get('accounts', {}).get(account)
+    if not acc:
+        return
+    acc.pop('last_error', None)
+    acc.pop('error_at', None)
+    acc.pop('consecutive_errors', None)
+    saveState(state)
+
+
+def markAccountError(account: str, message: str):
+    """Record a transient failure without discarding prior sync state."""
+    state = loadState()
+    accounts = state.setdefault('accounts', {})
+    acc = accounts.setdefault(account, {})
+    acc['status'] = 'error'
+    acc['last_error'] = message
+    acc['error_at'] = datetime.now().astimezone().isoformat()
+    acc['consecutive_errors'] = acc.get('consecutive_errors', 0) + 1
+    saveState(state)
+
+
+def markAccountUnavailable(account: str, message: str):
+    """Preserve an archive while marking its remote account unavailable."""
+    now = datetime.now().astimezone().isoformat()
+    setAccountState(
+        account,
+        status='unavailable',
+        availability='unavailable',
+        last_error=message,
+        checked_at=now,
+    )
 
 
 def getCollectionState(name: str) -> dict:

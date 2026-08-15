@@ -67,7 +67,12 @@ archivage twitter likes               # archive personal likes
 archivage twitter bookmarks           # archive personal bookmarks
 archivage twitter digest              # generate text digests for all
 archivage twitter status              # show progress table
-archivage twitter reindex             # rebuild state from archive files
+archivage twitter reindex             # rebuild state and stable identities
+archivage twitter index               # build/update local SQLite FTS
+archivage twitter search 'words'      # search locally without API quota
+archivage twitter read <id-or-url>    # read one locally archived tweet
+archivage twitter thread <id-or-url>  # read the archived conversation
+archivage twitter media <id-or-url>   # list or download archived media
 ```
 
 ### How sync works
@@ -81,6 +86,18 @@ paginates to the end. Subsequent runs stop after 3 all-duplicate pages.
 Cursors are saved to state for resume on interruption.
 
 Sync is idempotent — tweets are deduplicated by ID on every write.
+
+Accounts are followed by stable Twitter user ID after the first successful
+lookup. Handle changes are retained as aliases and do not create a second
+archive. If an account is deleted or suspended, sync marks it unavailable and
+keeps the existing JSONL archive. Other errors make the command fail so a
+systemd timer cannot silently report success.
+
+`~/.cache/archivage/twitter/search.sqlite` is a derived, rebuildable full-text
+index over account archives, likes, and bookmarks. It deliberately lives
+outside the synced archive to avoid SQLite conflicts. `twitter sync`, `likes`,
+and `bookmarks` update it incrementally; run `twitter index --force` to
+reconstruct it from scratch on each machine.
 
 ## Withings
 

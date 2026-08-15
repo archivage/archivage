@@ -4,6 +4,7 @@ JSONL.gz storage for archived tweets.
 
 import gzip
 import json
+import re
 from pathlib import Path
 
 
@@ -19,6 +20,63 @@ def getTweetId(tweet: dict) -> str | None:
     if "tweet_id" in tweet:
         return str(tweet["tweet_id"])
     return None
+
+
+def normalizeTweetId(value: str) -> str:
+    """Extract a tweet ID from an ID or Twitter/X status URL."""
+    match = re.search(r'(?:status/)?(\d{5,})', value)
+    if not match:
+        raise ValueError(f'Invalid tweet ID or URL: {value}')
+    return match.group(1)
+
+
+def tweetAuthor(tweet: dict) -> dict:
+    """Extract stable author identity from a GraphQL tweet result."""
+    result = (
+        tweet.get('core', {})
+        .get('user_results', {})
+        .get('result', {})
+    )
+    core = result.get('core', {})
+    legacy = result.get('legacy', {})
+    return {
+        'user_id': result.get('rest_id') or tweet.get('legacy', {}).get('user_id_str'),
+        'handle': core.get('screen_name') or legacy.get('screen_name'),
+        'name': core.get('name') or legacy.get('name'),
+    }
+
+
+def tweetText(tweet: dict) -> str:
+    """Return the longest text representation available for a tweet."""
+    note_text = (
+        tweet.get('note_tweet', {})
+        .get('note_tweet_results', {})
+        .get('result', {})
+        .get('text')
+    )
+    legacy = tweet.get('legacy', {})
+    return note_text or legacy.get('full_text') or legacy.get('text') or ''
+
+
+def tweetIdentity(tweets: list[dict]) -> dict:
+    """Summarize author identity and observed handles from a tweet page."""
+    user_id = None
+    current_handle = None
+    aliases = set()
+
+    for tweet in tweets:
+        author = tweetAuthor(tweet)
+        if author['user_id']:
+            user_id = author['user_id']
+        if author['handle']:
+            current_handle = author['handle']
+            aliases.add(author['handle'])
+
+    return {
+        'user_id': user_id,
+        'current_handle': current_handle,
+        'aliases': sorted(aliases, key=str.lower),
+    }
 
 
 def loadExistingIds(path: Path) -> set[str]:
