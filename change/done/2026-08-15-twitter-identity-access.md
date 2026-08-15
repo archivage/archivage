@@ -1,6 +1,6 @@
 ---
 started: 2026-08-15
-done:
+done: 2026-08-15
 ---
 
 # Twitter identity, local search, and agent access
@@ -22,7 +22,7 @@ available to agents through a dedicated read-only workflow.
   search, tweet, thread, and media lookup commands.
 - Use the public `twitter-cli` only for live cache misses. Put agent routing and
   account-safety rules in a dedicated `twitter` skill, not in generic ops.
-- Prefer the Obtener session for public reads. Never expose cookies in prompts,
+- Prefer the Obteneur session for public reads. Never expose cookies in prompts,
   command arguments, logs, or committed files. Keep all write operations out of
   the default agent workflow.
 
@@ -54,5 +54,5 @@ available to agents through a dedicated read-only workflow.
 - [x] Create and validate the twitter skill
 - [x] Reindex and deploy identities on Lune
 - [x] Update archive documentation
-- [ ] Pin and verify the intended Obtener cookie after explicit account confirmation
+- [x] Pin and verify the intended Obteneur cookie after explicit account confirmation
 - [x] Finish the targeted Lune sync and build its initial local FTS index
