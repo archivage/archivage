@@ -105,6 +105,7 @@ class TwitterClient:
         self.client = None
         self.csrf_token = None
         self.transaction = None
+        self.rate_limit_until = None
         self.query_ids = QUERY_IDS.copy()
         self.query_cache = Path.home() / '.cache/archivage/twitter-query-ids.json'
         self._loadQueryIds()
@@ -257,6 +258,24 @@ class TwitterClient:
         refreshed_query_ids = False
 
         for attempt in range(max_retries):
+            if self.rate_limit_until:
+                sleep_time = self.rate_limit_until - time.time()
+                self.rate_limit_until = None
+                if sleep_time > 0:
+                    resume_at = datetime.fromtimestamp(
+                        time.time() + sleep_time
+                    ).strftime('%H:%M:%S')
+                    logger.info(
+                        f'Rate limit pause before next request: {sleep_time:.0f}s '
+                        f'(until {resume_at})'
+                    )
+                    print(
+                        f'  Rate limit pause: {sleep_time / 60:.1f}m '
+                        f'(until {resume_at})',
+                        flush=True,
+                    )
+                    time.sleep(sleep_time)
+
             endpoint = self._endpoint(operation)
             url = self.root + endpoint
             txn_id = self._getTransactionId(url)
@@ -273,18 +292,16 @@ class TwitterClient:
                 self.csrf_token = response.cookies["ct0"]
                 self.client.headers["x-csrf-token"] = self.csrf_token
 
-            # Handle rate limiting
             remaining = int(response.headers.get("x-rate-limit-remaining", 100))
-            if remaining < 5:
-                reset_time = int(response.headers.get("x-rate-limit-reset", 0))
-                sleep_time = max(reset_time - time.time(), 60)
-                resume_at = datetime.fromtimestamp(reset_time).strftime("%H:%M:%S")
-                logger.info(f"Rate limit low ({remaining}), sleeping {sleep_time:.0f}s (until {resume_at})")
-                print(f"  Rate limit low ({remaining}), sleeping {sleep_time/60:.1f}m (until {resume_at})", flush=True)
-                time.sleep(sleep_time)
-                continue
-
             if response.status_code == 200:
+                if remaining < 5:
+                    reset_time = int(response.headers.get('x-rate-limit-reset', 0))
+                    if reset_time > time.time():
+                        self.rate_limit_until = reset_time
+                        logger.info(
+                            f'Rate limit low ({remaining}); next request will wait '
+                            f'until {datetime.fromtimestamp(reset_time).strftime("%H:%M:%S")}'
+                        )
                 return response.json()
 
             if response.status_code in (404, 422) and not refreshed_query_ids:
