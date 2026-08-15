@@ -55,4 +55,4 @@ available to agents through a dedicated read-only workflow.
 - [x] Reindex and deploy identities on Lune
 - [x] Update archive documentation
 - [ ] Pin and verify the intended Obtener cookie after explicit account confirmation
-- [ ] Finish the targeted Lune sync and build its initial local FTS index
+- [x] Finish the targeted Lune sync and build its initial local FTS index
