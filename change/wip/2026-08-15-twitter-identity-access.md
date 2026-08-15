@@ -17,8 +17,9 @@ available to agents through a dedicated read-only workflow.
   reindex, and keep deleted/unavailable accounts as preserved archives.
 - Fail the daily service on transient per-account errors, but classify
   definitive unavailable accounts without deleting or repeatedly alarming.
-- Build a SQLite FTS5 index beside the JSONL.gz source files. Index new tweets
-  during sync and provide local search, tweet, thread, and media lookup commands.
+- Build a rebuildable SQLite FTS5 index in the machine-local cache, outside the
+  synced JSONL.gz source files. Index new tweets during sync and provide local
+  search, tweet, thread, and media lookup commands.
 - Use the public `twitter-cli` only for live cache misses. Put agent routing and
   account-safety rules in a dedicated `twitter` skill, not in generic ops.
 - Prefer the Obtener session for public reads. Never expose cookies in prompts,
@@ -44,12 +45,14 @@ available to agents through a dedicated read-only workflow.
 
 ## Tasks
 
-- [ ] Add stable identity and availability state
-- [ ] Detect handle changes and preserve aliases
-- [ ] Surface transient sync failures to systemd
-- [ ] Add SQLite FTS5 indexing and local lookup commands
-- [ ] Add live lookup wrappers and media handling
-- [ ] Install and verify twitter-cli
-- [ ] Create and validate the twitter skill
-- [ ] Reindex and deploy on Lune
-- [ ] Update archive documentation
+- [x] Add stable identity and availability state
+- [x] Detect handle changes and preserve aliases
+- [x] Surface transient sync failures to systemd
+- [x] Add SQLite FTS5 indexing and local lookup commands
+- [x] Add live lookup wrappers and media handling
+- [x] Install twitter-cli locally and on Lune
+- [x] Create and validate the twitter skill
+- [x] Reindex and deploy identities on Lune
+- [x] Update archive documentation
+- [ ] Pin and verify the intended Obtener cookie after explicit account confirmation
+- [ ] Finish the targeted Lune sync and build its initial local FTS index

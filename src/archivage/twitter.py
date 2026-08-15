@@ -326,8 +326,11 @@ class TwitterClient:
         }
 
         data = self._call('UserByScreenName', params)
+        user = data.get('data', {}).get('user')
+        if not isinstance(user, dict) or not user.get('result'):
+            raise AccountUnavailable(self._unavailableReason(data))
         try:
-            result = data['data']['user']['result']
+            result = user['result']
         except (KeyError, TypeError):
             raise TwitterResponseError('User lookup returned no user')
         self._ensureAvailable(result)
@@ -339,6 +342,13 @@ class TwitterClient:
         if typename == 'UserUnavailable':
             reason = result.get('reason') or result.get('message') or 'unavailable'
             raise AccountUnavailable(reason)
+
+    @staticmethod
+    def _unavailableReason(data: dict) -> str:
+        errors = data.get('errors', []) if isinstance(data, dict) else []
+        messages = [error.get('message') for error in errors
+                    if isinstance(error, dict) and error.get('message')]
+        return '; '.join(messages) or 'account unavailable'
 
     def _parseTimeline(self, instructions: list, include_retweets: bool = False):
         """Parse timeline instructions into (tweets, next_cursor, stop_on_empty)."""
@@ -413,10 +423,13 @@ class TwitterClient:
         }
 
         data = self._call('UserTweets', params)
+        user = data.get('data', {}).get('user')
+        if user is None or not isinstance(user, dict) or not user.get('result'):
+            raise AccountUnavailable(self._unavailableReason(data))
 
         # Parse response - handle both timeline and timeline_v2 keys
         try:
-            result = data["data"]["user"]["result"]
+            result = user['result']
             self._ensureAvailable(result)
             if "timeline_v2" in result:
                 instructions = result["timeline_v2"]["timeline"]["instructions"]

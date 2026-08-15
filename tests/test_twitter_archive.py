@@ -101,6 +101,16 @@ class UnavailableAccountTests(unittest.TestCase):
         with self.assertRaises(AccountUnavailable):
             client.getUserId('AudrandS')
 
+    def test_missing_user_result_is_unavailable(self):
+        client = TwitterClient(Path('/tmp/not-used'))
+        client._call = lambda *args, **kwargs: {
+            'data': {'user': {}},
+            'errors': [{'message': 'User is unavailable'}],
+        }
+
+        with self.assertRaisesRegex(AccountUnavailable, 'User is unavailable'):
+            client.getUserTweets('731746399746961408')
+
 
 class IndexTests(unittest.TestCase):
     def test_index_read_search_and_thread_are_idempotent(self):
