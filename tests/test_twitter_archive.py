@@ -8,7 +8,12 @@ from unittest.mock import Mock, patch
 import httpx
 
 from archivage import state
-from archivage.cli import collectionSyncPlan, syncCollection
+from archivage.cli import (
+    accountSyncMode,
+    archiveAccount,
+    collectionSyncPlan,
+    syncCollection,
+)
 from archivage.storage import normalizeTweetId, tweetIdentity
 from archivage.twitter import AccountUnavailable, QUERY_IDS, TwitterClient
 from archivage.twitter_index import indexFile, readThread, readTweet, searchTweets
@@ -241,6 +246,58 @@ class CollectionRecoveryTests(unittest.TestCase):
         self.assertNotIn('cursor', failed)
         self.assertEqual(failed['sync_mode'], 'full')
         self.assertEqual(collectionSyncPlan(failed), ('full', None))
+
+
+class AccountRecoveryTests(unittest.TestCase):
+    def test_interrupted_incremental_account_stays_incremental(self):
+        state_value = {
+            'status': 'in_progress',
+            'newest_id': '200',
+            'sync_mode': 'incremental',
+        }
+
+        self.assertEqual(accountSyncMode(state_value), 'incremental')
+
+    def test_interrupted_full_account_stays_full(self):
+        state_value = {
+            'status': 'in_progress',
+            'newest_id': '200',
+            'sync_mode': 'full',
+        }
+
+        self.assertEqual(accountSyncMode(state_value), 'full')
+
+    def test_legacy_interruption_with_boundary_recovers_incrementally(self):
+        state_value = {
+            'status': 'in_progress',
+            'newest_id': '200',
+        }
+
+        self.assertEqual(accountSyncMode(state_value), 'incremental')
+
+    def test_shared_client_is_not_closed_between_accounts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / 'state.json'
+            archive_dir = Path(temp_dir) / 'archive'
+            archive_dir.mkdir()
+            client = Mock()
+            with patch.object(state, '_stateFile', return_value=state_file):
+                state.setAccountState(
+                    'example',
+                    user_id='123',
+                    newest_id='200',
+                    status='complete',
+                )
+                with patch('archivage.cli.syncForward') as sync_forward:
+                    archiveAccount(
+                        'example',
+                        Path('/tmp/not-used'),
+                        archive_dir,
+                        client=client,
+                    )
+
+        sync_forward.assert_called_once()
+        client.close.assert_not_called()
 
 
 class IndexTests(unittest.TestCase):

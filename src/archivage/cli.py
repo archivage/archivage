@@ -70,6 +70,7 @@ def _handleInterrupt(signum, frame):
             newest_id=ctx["newest_id"],
             oldest_id=ctx["oldest_id"],
             status="in_progress",
+            sync_mode=ctx.get("sync_mode"),
         )
         output("State saved. Run sync again to resume.")
     sys.exit(130 if signum == signal.SIGINT else 143)
@@ -108,8 +109,17 @@ def updateAccountIdentity(account: str, tweets: list[dict]):
     )
 
 
+def accountSyncMode(state: dict, full: bool = False) -> str:
+    if full or not state.get('newest_id'):
+        return 'full'
+    if state.get('status') in ('in_progress', 'error'):
+        return state.get('sync_mode') or 'incremental'
+    return 'incremental'
+
+
 def archiveAccount(account: str, cookies_path: Path, archive_dir: Path,
-                   full: bool = False, retry_unavailable: bool = False):
+                   full: bool = False, retry_unavailable: bool = False,
+                   client: TwitterClient | None = None):
     """Archive a single Twitter account via UserTweets timeline."""
     output_path = archive_dir / f"{account}.jsonl.gz"
     state = getAccountState(account)
@@ -119,7 +129,8 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path,
         return
 
     logger.info(f"Sync start: @{account}" + (" (full)" if full else ""))
-    client = TwitterClient(cookies_path)
+    own_client = client is None
+    client = client or TwitterClient(cookies_path)
 
     try:
         user_id = state.get('user_id')
@@ -135,17 +146,14 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path,
 
         state = getAccountState(account)
         prev_newest_id = state.get("newest_id")
-        status = state.get("status")
+        sync_mode = accountSyncMode(state, full)
 
         existing_ids = loadExistingIds(output_path)
         logger.debug(f"Loaded {len(existing_ids)} existing IDs")
 
         include_retweets = getTwitterIncludeRetweets()
 
-        # Decide sync mode:
-        # - Full sync: no newest_id yet, or explicit --full, or resuming in_progress
-        # - Incremental: have newest_id and status is complete
-        if full or not prev_newest_id or status == "in_progress":
+        if sync_mode == 'full':
             syncBackwards(client, account, user_id, output_path, existing_ids,
                           include_retweets, prev_newest_id)
         else:
@@ -160,7 +168,8 @@ def archiveAccount(account: str, cookies_path: Path, archive_dir: Path,
         clearAccountError(account)
 
     finally:
-        client.close()
+        if own_client:
+            client.close()
 
 
 def syncBackwards(client, account: str, user_id: str, output_path: Path,
@@ -183,11 +192,12 @@ def syncBackwards(client, account: str, user_id: str, output_path: Path,
     output(f"{account}: full sync")
     logger.info("Starting full backwards sync via UserTweets")
 
-    setAccountState(account, status="in_progress")
+    setAccountState(account, status='in_progress', sync_mode='full')
 
     _sync_context["account"] = account
     _sync_context["newest_id"] = newest_id
     _sync_context["oldest_id"] = oldest_id
+    _sync_context["sync_mode"] = 'full'
     _sync_context["active"] = True
 
     try:
@@ -254,6 +264,7 @@ def syncBackwards(client, account: str, user_id: str, output_path: Path,
         raise
 
     _sync_context["active"] = False
+    _sync_context["sync_mode"] = None
     total = countTweets(output_path)
     setAccountState(account, count=total)
     if index_complete and output_path.exists():
@@ -284,7 +295,10 @@ def syncForward(client, account: str, user_id: str, output_path: Path,
     _sync_context["account"] = account
     _sync_context["newest_id"] = since_id  # Keep original to avoid gaps
     _sync_context["oldest_id"] = None
+    _sync_context["sync_mode"] = 'incremental'
     _sync_context["active"] = True
+
+    setAccountState(account, status='in_progress', sync_mode='incremental')
 
     try:
         while True:
@@ -343,6 +357,7 @@ def syncForward(client, account: str, user_id: str, output_path: Path,
         raise
 
     _sync_context["active"] = False
+    _sync_context["sync_mode"] = None
     total = countTweets(output_path)
     setAccountState(account, count=total)
     if index_complete and output_path.exists():
@@ -589,25 +604,30 @@ def twitter_sync(accounts, full):
         click.echo(f"Syncing {len(accounts)} accounts")
 
     failures = []
-    for account in accounts:
-        try:
-            archiveAccount(
-                account,
-                cookies,
-                archive_dir,
-                full=full,
-                retry_unavailable=explicit_accounts,
-            )
-        except AccountUnavailable as e:
-            message = f'{e.reason}; archive preserved'
-            markAccountUnavailable(account, message)
-            logger.warning(f'@{account} unavailable: {message}')
-            click.echo(f'Unavailable @{account}: {message}')
-        except Exception as e:
-            markAccountError(account, str(e))
-            logger.error(f"Error archiving @{account}: {e}")
-            click.echo(f"Error archiving @{account}: {e}")
-            failures.append((account, str(e)))
+    client = TwitterClient(cookies)
+    try:
+        for account in accounts:
+            try:
+                archiveAccount(
+                    account,
+                    cookies,
+                    archive_dir,
+                    full=full,
+                    retry_unavailable=explicit_accounts,
+                    client=client,
+                )
+            except AccountUnavailable as e:
+                message = f'{e.reason}; archive preserved'
+                markAccountUnavailable(account, message)
+                logger.warning(f'@{account} unavailable: {message}')
+                click.echo(f'Unavailable @{account}: {message}')
+            except Exception as e:
+                markAccountError(account, str(e))
+                logger.exception(f"Error archiving @{account}: {e}")
+                click.echo(f"Error archiving @{account}: {e}")
+                failures.append((account, str(e)))
+    finally:
+        client.close()
 
     if failures:
         names = ', '.join(f'@{account}' for account, _ in failures)

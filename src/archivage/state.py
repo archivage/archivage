@@ -53,7 +53,7 @@ def setAccountState(account: str, newest_id: str = None, oldest_id: str = None,
                     status: str = None, count: int = None, user_id: str = None,
                     current_handle: str = None, aliases: list[str] = None,
                     availability: str = None, last_error: str = None,
-                    checked_at: str = None):
+                    checked_at: str = None, sync_mode: str = None):
     """Update state for a specific account."""
     state = loadState()
     if "accounts" not in state:
@@ -102,6 +102,11 @@ def setAccountState(account: str, newest_id: str = None, oldest_id: str = None,
 
     if checked_at is not None:
         acc['checked_at'] = checked_at
+
+    if sync_mode is not None:
+        acc['sync_mode'] = sync_mode
+    if status == 'complete':
+        acc.pop('sync_mode', None)
 
     # Clean up legacy fields
     for field in ["archived_until", "cursor", "method"]:
