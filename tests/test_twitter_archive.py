@@ -3,11 +3,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import httpx
 
 from archivage import state
+from archivage.cli import collectionSyncPlan, syncCollection
 from archivage.storage import normalizeTweetId, tweetIdentity
-from archivage.twitter import AccountUnavailable, TwitterClient
+from archivage.twitter import AccountUnavailable, QUERY_IDS, TwitterClient
 from archivage.twitter_index import indexFile, readThread, readTweet, searchTweets
 
 
@@ -110,6 +113,134 @@ class UnavailableAccountTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AccountUnavailable, 'User is unavailable'):
             client.getUserTweets('731746399746961408')
+
+
+class QueryIdRecoveryTests(unittest.TestCase):
+    def test_bookmarks_falls_back_when_live_discovery_is_unauthorized(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = TwitterClient(Path('/tmp/not-used'))
+            client.query_cache = Path(temp_dir) / 'query-ids.json'
+            client.query_ids['Bookmarks'] = 'stale-query-id'
+            client.client = Mock()
+            client.client.cookies = {}
+            client.client.headers = {}
+            client.client.get.side_effect = [
+                httpx.Response(
+                    404,
+                    request=httpx.Request('GET', 'https://x.com/stale'),
+                ),
+                httpx.Response(
+                    401,
+                    request=httpx.Request('GET', 'https://x.com/'),
+                ),
+                httpx.Response(
+                    200,
+                    json={'data': {'bookmark_timeline_v2': {}}},
+                    request=httpx.Request('GET', 'https://x.com/working'),
+                ),
+            ]
+
+            result = client._call('Bookmarks', {})
+            urls = [call.args[0] for call in client.client.get.call_args_list]
+
+        self.assertIn('bookmark_timeline_v2', result['data'])
+        self.assertIn('/stale-query-id/Bookmarks', urls[0])
+        self.assertEqual(urls[1], 'https://x.com/')
+        self.assertIn(f"/{QUERY_IDS['Bookmarks']}/Bookmarks", urls[2])
+
+
+class CollectionRecoveryTests(unittest.TestCase):
+    def test_interrupted_collection_without_cursor_recovers_incrementally(self):
+        state_value = {
+            'status': 'in_progress',
+            'newest_id': '200',
+            'oldest_id': '100',
+            'count': 50,
+        }
+
+        self.assertEqual(collectionSyncPlan(state_value), ('incremental', None))
+
+    def test_full_option_ignores_saved_cursor(self):
+        state_value = {
+            'status': 'in_progress',
+            'newest_id': '200',
+            'cursor': 'saved-cursor',
+            'sync_mode': 'incremental',
+        }
+
+        self.assertEqual(collectionSyncPlan(state_value, full=True), ('full', None))
+
+    def test_failed_full_run_keeps_full_mode_before_first_page(self):
+        state_value = {
+            'status': 'error',
+            'newest_id': '200',
+            'sync_mode': 'full',
+        }
+
+        self.assertEqual(collectionSyncPlan(state_value), ('full', None))
+
+    def test_failed_collection_records_error_and_retry_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / 'state.json'
+            output_path = Path(temp_dir) / 'bookmarks.jsonl.gz'
+            with patch.object(state, '_stateFile', return_value=state_file):
+                state.setCollectionState(
+                    'bookmarks',
+                    status='complete',
+                    newest_id='200',
+                    oldest_id='100',
+                    count=50,
+                )
+
+                def failFetch(cursor, count):
+                    raise RuntimeError('temporary failure')
+
+                with self.assertRaisesRegex(RuntimeError, 'temporary failure'):
+                    syncCollection(
+                        None,
+                        'bookmarks',
+                        output_path,
+                        set(),
+                        failFetch,
+                    )
+                failed = state.getCollectionState('bookmarks')
+
+        self.assertEqual(failed['status'], 'error')
+        self.assertEqual(failed['sync_mode'], 'incremental')
+        self.assertEqual(failed['newest_id'], '200')
+        self.assertEqual(collectionSyncPlan(failed), ('incremental', None))
+
+    def test_forced_full_run_discards_a_stale_cursor_before_fetch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / 'state.json'
+            output_path = Path(temp_dir) / 'bookmarks.jsonl.gz'
+            with patch.object(state, '_stateFile', return_value=state_file):
+                state.setCollectionState(
+                    'bookmarks',
+                    status='error',
+                    newest_id='200',
+                    cursor='stale-cursor',
+                    sync_mode='incremental',
+                )
+
+                def failFetch(cursor, count):
+                    self.assertIsNone(cursor)
+                    raise RuntimeError('temporary failure')
+
+                with self.assertRaisesRegex(RuntimeError, 'temporary failure'):
+                    syncCollection(
+                        None,
+                        'bookmarks',
+                        output_path,
+                        set(),
+                        failFetch,
+                        full=True,
+                    )
+                failed = state.getCollectionState('bookmarks')
+
+        self.assertNotIn('cursor', failed)
+        self.assertEqual(failed['sync_mode'], 'full')
+        self.assertEqual(collectionSyncPlan(failed), ('full', None))
 
 
 class IndexTests(unittest.TestCase):

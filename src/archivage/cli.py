@@ -42,6 +42,7 @@ _sync_context = {
     "newest_id": None,
     "oldest_id": None,
     "cursor": None,
+    "sync_mode": None,
     "active": False,
 }
 
@@ -58,6 +59,7 @@ def _handleInterrupt(signum, frame):
             oldest_id=ctx["oldest_id"],
             cursor=ctx.get("cursor"),
             status="in_progress",
+            sync_mode=ctx.get("sync_mode"),
         )
         output("State saved. Run again to resume.")
     elif ctx["active"] and ctx["account"]:
@@ -349,7 +351,25 @@ def syncForward(client, account: str, user_id: str, output_path: Path,
     logger.info(f"Sync done: @{account} new={total_new} total={total}")
 
 
-def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn):
+def collectionSyncPlan(state: dict, full: bool = False) -> tuple[str, str | None]:
+    if full:
+        return 'full', None
+
+    status = state.get('status')
+    cursor = state.get('cursor')
+    if status in ('in_progress', 'error'):
+        sync_mode = state.get('sync_mode')
+        if cursor:
+            return sync_mode or 'full', cursor
+        if sync_mode:
+            return sync_mode, None
+    if state.get('newest_id') and status in ('complete', 'in_progress', 'error'):
+        return 'incremental', None
+    return 'full', None
+
+
+def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn,
+                   full: bool = False):
     """Sync a collection (likes or bookmarks) by paginating newest-first.
 
     fetch_fn(cursor, count) -> (tweets, next_cursor)
@@ -363,15 +383,12 @@ def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn)
     oldest_id = None
 
     state = getCollectionState(collection)
-    prev_status = state.get("status")
     prev_newest = state.get("newest_id")
     prev_oldest = state.get("oldest_id")
-    resume_cursor = state.get("cursor")
-    is_incremental = prev_status == "complete" and prev_newest
+    sync_mode, cursor = collectionSyncPlan(state, full)
+    is_incremental = sync_mode == 'incremental'
 
-    cursor = None
-    if prev_status == "in_progress" and resume_cursor:
-        cursor = resume_cursor
+    if cursor:
         output(f"{collection}: resuming from saved cursor")
         logger.info(f"Resuming {collection} from cursor")
     elif is_incremental:
@@ -385,7 +402,12 @@ def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn)
     newest_id = prev_newest
     oldest_id = prev_oldest
 
-    setCollectionState(collection, status="in_progress")
+    setCollectionState(
+        collection,
+        status='in_progress',
+        cursor=cursor,
+        sync_mode=sync_mode,
+    )
 
     # Set up interrupt context
     _sync_context["collection"] = collection
@@ -393,6 +415,7 @@ def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn)
     _sync_context["newest_id"] = newest_id
     _sync_context["oldest_id"] = oldest_id
     _sync_context["cursor"] = cursor
+    _sync_context["sync_mode"] = sync_mode
     _sync_context["active"] = True
 
     try:
@@ -459,11 +482,21 @@ def syncCollection(client, collection: str, output_path, existing_ids, fetch_fn)
 
     except Exception:
         running_count = initial_count + total_new
-        setCollectionState(collection, count=running_count)
+        setCollectionState(
+            collection,
+            status='error',
+            count=running_count,
+            cursor=_sync_context['cursor'],
+            sync_mode=sync_mode,
+        )
+        _sync_context["active"] = False
+        _sync_context["collection"] = None
+        _sync_context["sync_mode"] = None
         raise
 
     _sync_context["active"] = False
     _sync_context["collection"] = None
+    _sync_context["sync_mode"] = None
     total = countTweets(output_path)
     setCollectionState(collection, newest_id=newest_id, oldest_id=oldest_id,
                        status="complete", count=total)
@@ -850,9 +883,6 @@ def twitter_likes(full):
     output_path = getArchiveDir() / "twitter/likes.jsonl.gz"
     existing_ids = loadExistingIds(output_path)
 
-    if full:
-        setCollectionState("likes", status=None)
-
     client = TwitterClient(cookies)
     try:
         user_id = _resolvePersonalUserId(client)
@@ -860,7 +890,14 @@ def twitter_likes(full):
         def fetch_likes(cursor, count):
             return client.getLikes(user_id, cursor=cursor, count=count)
 
-        syncCollection(client, "likes", output_path, existing_ids, fetch_likes)
+        syncCollection(
+            client,
+            "likes",
+            output_path,
+            existing_ids,
+            fetch_likes,
+            full=full,
+        )
     finally:
         client.close()
 
@@ -878,15 +915,19 @@ def twitter_bookmarks(full):
     output_path = getArchiveDir() / "twitter/bookmarks.jsonl.gz"
     existing_ids = loadExistingIds(output_path)
 
-    if full:
-        setCollectionState("bookmarks", status=None)
-
     client = TwitterClient(cookies)
     try:
         def fetch_bookmarks(cursor, count):
             return client.getBookmarks(cursor=cursor, count=count)
 
-        syncCollection(client, "bookmarks", output_path, existing_ids, fetch_bookmarks)
+        syncCollection(
+            client,
+            "bookmarks",
+            output_path,
+            existing_ids,
+            fetch_bookmarks,
+            full=full,
+        )
     finally:
         client.close()
 

@@ -26,8 +26,16 @@ QUERY_IDS = {
     'UserTweets': 'E3opETHurmVJflFsUBVuUQ',
     'UserByScreenName': 'qRednkZG-rn1P6b48NINmQ',
     'Likes': 'dv5-II7_Bup_PHish7p6fw',
-    'Bookmarks': 'uzboyXSHSJrR-mGJqep0TQ',
+    'Bookmarks': 'pLtjrO4ubNh996M_Cubwsg',
     'SearchTimeline': 'MJpyQGqgklrVl_0X9gNy3A',
+}
+
+QUERY_ID_FALLBACKS = {
+    'UserTweets': ['E8Wq-_jFSaU7hxVcuOPR9g'],
+    'UserByScreenName': ['ck5KkZ8t5cOmoLssopN99Q'],
+    'Likes': ['TGEKkJG_meudeaFcqaxM-Q'],
+    'Bookmarks': ['uzboyXSHSJrR-mGJqep0TQ'],
+    'SearchTimeline': ['AIdc203rPpK_k_2KWSdm7g'],
 }
 
 
@@ -133,8 +141,13 @@ class TwitterClient:
 
     def _refreshQueryIds(self) -> bool:
         """Discover current GraphQL query IDs from X's web bundles."""
-        response = self.client.get('https://x.com/')
-        response.raise_for_status()
+        try:
+            response = self.client.get('https://x.com/')
+            response.raise_for_status()
+        except httpx.HTTPError as error:
+            logger.warning(f'Query ID discovery unavailable: {error}')
+            return False
+
         script_urls = list(dict.fromkeys(re.findall(
             r'(https://abs\.twimg\.com/responsive-web/client-web[^"\']+\.js)',
             response.text,
@@ -163,6 +176,18 @@ class TwitterClient:
         self._saveQueryIds()
         logger.info(f'Discovered {len(found)} live Twitter query IDs')
         return True
+
+    def _useFallbackQueryId(self, operation: str, rejected: set[str]) -> bool:
+        candidates = [QUERY_IDS.get(operation)]
+        candidates.extend(QUERY_ID_FALLBACKS.get(operation, []))
+        for query_id in candidates:
+            if not query_id or query_id in rejected:
+                continue
+            self.query_ids[operation] = query_id
+            self._saveQueryIds()
+            logger.warning(f'Using fallback query ID for {operation}')
+            return True
+        return False
 
     def _loadCookies(self) -> dict[str, str]:
         """Load cookies from Netscape format file."""
@@ -256,6 +281,7 @@ class TwitterClient:
 
         max_retries = 5
         refreshed_query_ids = False
+        rejected_query_ids = set()
 
         for attempt in range(max_retries):
             if self.rate_limit_until:
@@ -305,8 +331,15 @@ class TwitterClient:
                 return response.json()
 
             if response.status_code in (404, 422) and not refreshed_query_ids:
+                rejected_query_ids.add(self.query_ids[operation])
                 refreshed_query_ids = True
-                if self._refreshQueryIds():
+                self._refreshQueryIds()
+                if self.query_ids[operation] not in rejected_query_ids:
+                    continue
+
+            if response.status_code in (404, 422):
+                rejected_query_ids.add(self.query_ids[operation])
+                if self._useFallbackQueryId(operation, rejected_query_ids):
                     continue
 
             if response.status_code == 429:

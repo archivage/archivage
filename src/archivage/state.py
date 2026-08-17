@@ -14,6 +14,9 @@ from datetime import datetime
 from .config import getTwitterStateDir
 
 
+_UNSET = object()
+
+
 def _stateFile() -> Path:
     """Get state file path (inside archive dir for syncing)."""
     return getTwitterStateDir() / "state.json"
@@ -152,7 +155,9 @@ def getCollectionState(name: str) -> dict:
 
 def setCollectionState(name: str, newest_id: str = None, oldest_id: str = None,
                        status: str = None, count: int = None,
-                       cursor: str = None, user_id: str = None):
+                       cursor: str | None | object = _UNSET,
+                       user_id: str = None,
+                       sync_mode: str = None):
     """Update state for a collection (likes, bookmarks)."""
     state = loadState()
     if name not in state:
@@ -165,12 +170,15 @@ def setCollectionState(name: str, newest_id: str = None, oldest_id: str = None,
     if status   is not None: col["status"]    = status
     if count    is not None: col["count"]      = count
     if user_id  is not None: col["user_id"]    = user_id
+    if sync_mode is not None: col["sync_mode"] = sync_mode
 
     # cursor: save for resume, clear on completion
-    if cursor is not None:
+    if cursor is not _UNSET and cursor is not None:
         col["cursor"] = cursor
-    elif status == "complete" and "cursor" in col:
-        del col["cursor"]
+    elif cursor is None or status == "complete":
+        col.pop("cursor", None)
+    if status == "complete":
+        col.pop("sync_mode", None)
 
     saveState(state)
 
