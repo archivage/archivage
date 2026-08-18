@@ -8,9 +8,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unicodedata
 from datetime import date
 from pathlib import Path
+from typing import Callable
 
 from .log import logger
 
@@ -56,12 +58,55 @@ def fetchMetadata(url: str, work_dir: Path) -> dict:
     return json.loads(info_path.read_text())
 
 
+def collectionVideos(url: str, work_dir: Path,
+                     limit: int | None = None) -> list[str]:
+    """List canonical video URLs from a channel tab or playlist.
+
+    Discovery is intentionally flat: metadata and subtitles are fetched later
+    by ``saveVideo``. This keeps the first request small and lets an interrupted
+    batch resume through the archive's per-video idempotency.
+    """
+    args = ['--flat-playlist', '--dump-single-json']
+    if limit is not None:
+        if limit < 1:
+            raise ValueError('limit must be greater than zero')
+        args.extend(['--playlist-end', str(limit)])
+    args.append(url)
+
+    result = runYtDlp(args, cwd=work_dir)
+    data = json.loads(result.stdout)
+    entries = data.get('entries') or []
+    videos = []
+    seen = set()
+    for entry in entries:
+        if not entry:
+            continue
+        video_id = entry.get('id')
+        if not video_id:
+            entry_url = entry.get('url') or entry.get('webpage_url') or ''
+            try:
+                video_id = extractVideoId(entry_url)
+            except ValueError:
+                continue
+        if not re.fullmatch(r'[a-zA-Z0-9_-]{11}', video_id):
+            continue
+        if video_id in seen:
+            continue
+        seen.add(video_id)
+        videos.append(f'https://www.youtube.com/watch?v={video_id}')
+    return videos
+
+
 def pickSubtitleLang(info: dict, preferred: str | None = None) -> tuple[str, bool]:
     """Pick the best subtitle language. Returns (lang_code, is_auto).
 
     Preference: explicit `preferred` > manual subs > auto en-orig > auto en > auto fr > first auto.
     """
-    manual = info.get("subtitles") or {}
+    manual = {
+        lang: formats
+        for lang, formats in (info.get('subtitles') or {}).items()
+        if lang != 'live_chat'
+    }
     auto = info.get("automatic_captions") or {}
 
     if preferred:
@@ -87,16 +132,20 @@ def pickSubtitleLang(info: dict, preferred: str | None = None) -> tuple[str, boo
 def fetchTranscript(url: str, lang: str, is_auto: bool, work_dir: Path) -> str:
     """Download subtitles, convert to SRT, return cleaned plain text (no timestamps)."""
     flag = "--write-auto-subs" if is_auto else "--write-subs"
-    runYtDlp(
-        ["--skip-download", flag, "--sub-lang", lang,
-         "--sub-format", "ttml", "--convert-subs", "srt",
-         "-o", "transcript.%(ext)s", url],
-        cwd=work_dir,
-    )
-
-    srt_files = list(work_dir.glob("*.srt"))
+    srt_files = []
+    for attempt in range(3):
+        runYtDlp(
+            ['--skip-download', '--retries', '3', flag, '--sub-lang', lang,
+             '--sub-format', 'srt', '-o', 'transcript.%(ext)s', url],
+            cwd=work_dir,
+        )
+        srt_files = list(work_dir.glob('*.srt'))
+        if srt_files:
+            break
+        if attempt < 2:
+            time.sleep(2 ** attempt)
     if not srt_files:
-        raise RuntimeError("No SRT file produced by yt-dlp")
+        raise RuntimeError('No SRT file produced by yt-dlp after 3 attempts')
 
     srt = srt_files[0].read_text()
     return srtToText(srt)
@@ -260,6 +309,55 @@ def saveVideo(url: str, archive_dir: Path,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(markdown, encoding="utf-8")
     return out_path, "saved"
+
+
+def saveCollection(url: str, archive_dir: Path,
+                   lang: str | None = None,
+                   force: bool = False,
+                   limit: int | None = None,
+                   fail_fast: bool = False,
+                   progress: Callable[[int, int, str, str], None] | None = None
+                   ) -> dict:
+    """Archive every transcript available in a channel tab or playlist.
+
+    Videos without captions and transient failures are reported and do not
+    prevent the remaining collection from being archived, unless
+    ``fail_fast`` is requested.
+    """
+    if not shutil.which('yt-dlp'):
+        raise RuntimeError('yt-dlp is required (sudo apt install yt-dlp)')
+
+    with tempfile.TemporaryDirectory(prefix='archivage-yt-list-') as tmp:
+        videos = collectionVideos(url, Path(tmp), limit=limit)
+
+    summary = {
+        'discovered': len(videos),
+        'saved': 0,
+        'skipped': 0,
+        'failed': [],
+    }
+    for i, video_url in enumerate(videos, start=1):
+        try:
+            path, status = saveVideo(
+                video_url,
+                archive_dir,
+                lang=lang,
+                force=force,
+            )
+            summary[status] += 1
+            detail = str(path)
+        except Exception as e:
+            summary['failed'].append({'url': video_url, 'error': str(e)})
+            status = 'failed'
+            detail = str(e)
+            if progress:
+                progress(i, len(videos), video_url, f'{status}: {detail}')
+            if fail_fast:
+                raise
+            continue
+        if progress:
+            progress(i, len(videos), video_url, f'{status}: {detail}')
+    return summary
 
 
 def archiveStats(archive_dir: Path) -> dict:

@@ -26,7 +26,9 @@ from .config import (getArchiveDir, getTwitterCookies, getTwitterAccounts,
                      getGmailImapHost, getGmailImapPort)
 from .log import setupLogging, logger
 from .web import savePage, saveAll
-from .youtube import saveVideo as ytSaveVideo, archiveStats as ytArchiveStats
+from .youtube import (archiveStats as ytArchiveStats,
+                      saveCollection as ytSaveCollection,
+                      saveVideo as ytSaveVideo)
 from . import newsletters as nl
 
 
@@ -1614,6 +1616,43 @@ def youtube_save(url, lang, host, guest, force):
         logger.error(f"Failed to save {url}: {e}")
         output(f"Error: {e}")
         sys.exit(1)
+
+
+@youtube.command('save-collection')
+@click.argument('url')
+@click.option('--lang', default=None, help='Subtitle language (auto-detect if omitted).')
+@click.option('--limit', type=click.IntRange(min=1), default=None,
+              help='Archive at most this many videos.')
+@click.option('--force', is_flag=True, help='Re-archive videos that already exist.')
+@click.option('--fail-fast', is_flag=True, help='Stop at the first unavailable transcript.')
+def youtube_save_collection(url, lang, limit, force, fail_fast):
+    """Save transcripts from a channel tab or playlist."""
+    archive_dir = getArchiveDir()
+
+    def progress(i, total, video_url, result):
+        output(f'  [{i}/{total}] {video_url} ({result})')
+
+    try:
+        summary = ytSaveCollection(
+            url,
+            archive_dir,
+            lang=lang,
+            force=force,
+            limit=limit,
+            fail_fast=fail_fast,
+            progress=progress,
+        )
+    except Exception as e:
+        logger.error(f'Failed to save collection {url}: {e}')
+        output(f'Error: {e}')
+        sys.exit(1)
+
+    output(
+        f"Done. Discovered {summary['discovered']}; saved {summary['saved']}; "
+        f"skipped {summary['skipped']}; failed {len(summary['failed'])}."
+    )
+    if summary['failed']:
+        sys.exit(2)
 
 
 @youtube.command("status")

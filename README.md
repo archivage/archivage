@@ -104,6 +104,7 @@ archivage web save-all <url>         # save all same-domain pages
 
 # YouTube transcripts
 archivage youtube save <url>         # save a video transcript as markdown
+archivage youtube save-collection <channel-or-playlist-url>  # batch, resumable
 archivage youtube status             # count archived videos by channel
 
 # Newsletters / email
@@ -116,6 +117,14 @@ archivage newsletters import <eml>   # ingest a single .eml file
 # All platforms
 archivage sync                       # sync everything
 ```
+
+`youtube save-collection` accepts a channel tab such as
+`https://www.youtube.com/@SemiAnalysis/videos` or a playlist URL. Discovery is
+lightweight, then each transcript uses the same idempotent archive path as
+`youtube save`. Videos without captions are reported while the batch continues;
+the command exits with code 2 if any video failed. Re-running it skips completed
+videos. Use `--limit N` for a bounded import, `--force` to refresh existing
+files, or `--fail-fast` when partial success is undesirable.
 
 ## Data layout
 
