@@ -6,7 +6,7 @@ import os
 import sys
 import signal
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import click
 from .twitter import AccountUnavailable, TwitterClient
@@ -17,7 +17,8 @@ from .state import (clearAccountError, getAccountState, getCollectionState,
                     markAccountError, markAccountUnavailable, parseTweetDate,
                     setAccountState, setCollectionState)
 from .twitter_index import (downloadMedia, indexTweets, markSource, mediaUrls,
-                            readThread, readTweet, rebuildIndex, searchTweets,
+                            readThread, readTweet, rebuildIndex, recentTweets,
+                            searchTweets,
                             sourceCurrent, stats as twitterIndexStats)
 from .config import (getArchiveDir, getTwitterCookies, getTwitterAccounts,
                      getTwitterIncludeRetweets, getTwitterPersonalCookies,
@@ -806,6 +807,39 @@ def _printTweet(tweet: dict):
         click.echo(f"Media: {len(tweet['media'])}")
 
 
+def _parseSince(value: str) -> datetime:
+    relative = value.lower().strip()
+    if relative.endswith(('h', 'd', 'w')) and relative[:-1].isdigit():
+        amount = int(relative[:-1])
+        unit = relative[-1]
+        delta = {
+            'h': timedelta(hours=amount),
+            'd': timedelta(days=amount),
+            'w': timedelta(weeks=amount),
+        }[unit]
+        return datetime.now().astimezone() - delta
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError as error:
+        raise click.BadParameter(
+            'Use an ISO timestamp or a relative duration such as 24h, 7d or 2w.'
+        ) from error
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed
+
+
+def _accountFile(path: Path) -> list[str]:
+    if not path.exists():
+        raise click.BadParameter(f'Account file does not exist: {path}')
+    accounts = []
+    for line in path.read_text().splitlines():
+        account = line.split('#', 1)[0].strip().lstrip('@')
+        if account:
+            accounts.append(account)
+    return accounts
+
+
 @twitter.command('index')
 @click.option('--force', is_flag=True, help='Re-read archives even when unchanged')
 def twitter_index(force):
@@ -830,6 +864,38 @@ def twitter_index(force):
 def twitter_search(query, limit, handle, as_json):
     """Search the local archive without hitting Twitter."""
     results = searchTweets(query, limit=limit, handle=handle)
+    if as_json:
+        click.echo(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+    for i, tweet in enumerate(results, start=1):
+        if i > 1:
+            click.echo()
+        _printTweet(tweet)
+
+
+@twitter.command('recent')
+@click.option('--since', required=True, callback=lambda _, __, value: _parseSince(value),
+              help='ISO timestamp or relative duration such as 24h or 7d')
+@click.option('--accounts-file', type=click.Path(path_type=Path),
+              help='One archived account per line; # comments are allowed')
+@click.option('--from', 'handles', multiple=True,
+              help='Restrict to an author; repeatable')
+@click.option('--limit', default=200, show_default=True,
+              type=click.IntRange(min=1))
+@click.option('--include-replies', is_flag=True)
+@click.option('--json', 'as_json', is_flag=True, help='Output JSON')
+def twitter_recent(since, accounts_file, handles, limit, include_replies, as_json):
+    """Read only locally archived tweets since the last brief or review."""
+    selected = list(handles)
+    if accounts_file:
+        selected.extend(_accountFile(accounts_file))
+    selected = list(dict.fromkeys(selected))
+    results = recentTweets(
+        since,
+        handles=selected,
+        limit=limit,
+        include_replies=include_replies,
+    )
     if as_json:
         click.echo(json.dumps(results, ensure_ascii=False, indent=2))
         return

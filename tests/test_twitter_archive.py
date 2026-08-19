@@ -2,6 +2,7 @@ import gzip
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -16,7 +17,14 @@ from archivage.cli import (
 )
 from archivage.storage import normalizeTweetId, tweetIdentity
 from archivage.twitter import AccountUnavailable, QUERY_IDS, TwitterClient
-from archivage.twitter_index import indexFile, readThread, readTweet, searchTweets
+from archivage.twitter_index import (
+    indexFile,
+    indexTweets,
+    readThread,
+    readTweet,
+    recentTweets,
+    searchTweets,
+)
 
 
 def sampleTweet(tweet_id: str, text: str, conversation_id: str | None = None):
@@ -322,6 +330,26 @@ class IndexTests(unittest.TestCase):
                 [tweet['id'] for tweet in readThread('101', database)],
                 ['100', '101'],
             )
+
+    def test_recent_filters_by_time_account_and_replies(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / 'search.sqlite'
+            first = sampleTweet('100', 'Current setup')
+            first['legacy']['created_at'] = 'Mon Aug 18 12:00:00 +0000 2026'
+            reply = sampleTweet('101', 'Reply noise')
+            reply['legacy']['created_at'] = 'Mon Aug 18 13:00:00 +0000 2026'
+            reply['legacy']['in_reply_to_status_id_str'] = '100'
+            old = sampleTweet('99', 'Old setup')
+            old['legacy']['created_at'] = 'Fri Aug 15 12:00:00 +0000 2026'
+            indexTweets([first, reply, old], 'RodolpheSteffan', database)
+
+            rows = recentTweets(
+                datetime(2026, 8, 17, tzinfo=timezone.utc),
+                handles=['rodolphesteffan'],
+                path=database,
+            )
+
+        self.assertEqual([row['id'] for row in rows], ['100'])
 
 
 if __name__ == '__main__':

@@ -4,7 +4,7 @@ import gzip
 import json
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -286,6 +286,35 @@ def searchTweets(query: str, limit: int = 20, handle: str = None,
         except sqlite3.OperationalError:
             params[0] = f'"{query.replace(chr(34), chr(34) * 2)}"'
             rows = db.execute(sql, params).fetchall()
+    return [_decode(row) for row in rows]
+
+
+def recentTweets(since: datetime, handles: list[str] = None, limit: int = 200,
+                 include_replies: bool = False, path: Path = None) -> list[dict]:
+    """Return archived tweets newer than ``since``, optionally by account."""
+    where = ['created_at >= ?']
+    params = [since.astimezone(timezone.utc).isoformat()]
+    normalized = [handle.lstrip('@').lower() for handle in (handles or [])]
+    if normalized:
+        placeholders = ', '.join('?' for _ in normalized)
+        where.append(
+            f'(lower(handle) IN ({placeholders}) '
+            f'OR lower(archive) IN ({placeholders}))'
+        )
+        params.extend(normalized)
+        params.extend(normalized)
+    if not include_replies:
+        where.append('reply_to_id IS NULL')
+    params.append(limit)
+    sql = f"""
+        SELECT * FROM tweets
+        WHERE {' AND '.join(where)}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+    """
+
+    with connect(path) as db:
+        rows = db.execute(sql, params).fetchall()
     return [_decode(row) for row in rows]
 
 
